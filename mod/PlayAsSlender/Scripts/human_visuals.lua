@@ -14,10 +14,14 @@ local State = {
     Flashlight         = nil,
     ModFlashlight      = nil,
     OrigFlashlight     = nil,
-    PointLight         = nil,
-    PointLight0        = nil,
-    FollowComp         = nil,
-    PostProcessComp    = nil,
+    PointLight               = nil,
+    PointLight0              = nil,
+    FollowComp               = nil,
+    PostProcessComp          = nil,
+    FlashlightEnabled        = true,
+    ModFlashlightIntensity   = 60.0,
+    PointLightBaseIntensity  = nil,
+    PointLight0BaseIntensity = nil,
     CurrentYaw         = 0.0,
     CurrentPitch       = -4.0,
     LastLightScan      = -1.0,
@@ -387,17 +391,9 @@ function HumanVisuals.Init(world, pc, mapKey)
         end
     end)
 
-    -- On Level01_Prologue, PlayerStart is 440m uphill on the mountain road; move Survivor onto the front dirt path facing BP_Door_Main
     -- On Level06_Escape, PlayerStart starts in 2F intro sketch cutscene; place Survivor cleanly in 1F Main Hallway inside the house
-    if mapKey == "PROLOGUE" then
-        local targetXY = { X = 44150.0, Y = 56700.0, Z = 9200.0 }
-        local gHit, gz = Bridge.GroundTrace(world, targetXY.X, targetXY.Y, 10200.0, 8200.0, { pawn })
-        local spawnPos = { X = targetXY.X, Y = targetXY.Y, Z = (gHit and gz or 9050.0) + 92.0 }
-        pcall(function()
-            pawn:K2_SetActorLocationAndRotation(spawnPos, { Pitch = 0.0, Yaw = 84.0, Roll = 0.0 }, false, {}, true)
-        end)
-        Logger.Info(string.format("Prologue Human placed outside House Yard @ (%.0f, %.0f, %.0f)", spawnPos.X, spawnPos.Y, spawnPos.Z))
-    elseif mapKey == "ESCAPE" then
+    -- On Level01_Prologue, PrologueStory places Survivor at the vanilla Car beside the fallen tree with flashlight OFF
+    if mapKey == "ESCAPE" then
         local targetXY = { X = 44270.0, Y = 58850.0, Z = 9100.0 }
         local gHit, gz = Bridge.GroundTrace(world, targetXY.X, targetXY.Y, 9350.0, 8750.0, { pawn })
         local spawnPos = { X = targetXY.X, Y = targetXY.Y, Z = (gHit and gz or 9006.3) + 92.0 }
@@ -585,8 +581,12 @@ end
 
     local modFl, modInten = CreateModFlashlight(pawn, origFl)
     if Logger.IsValidObj(modFl) then
-        State.ModFlashlight = modFl
-        State.Flashlight    = modFl
+        State.ModFlashlight          = modFl
+        State.Flashlight             = modFl
+        State.ModFlashlightIntensity = tonumber(modInten) or 60.0
+        State.FlashlightEnabled      = true
+        State.PointLightBaseIntensity  = nil
+        State.PointLight0BaseIntensity = nil
         SilenceSpotLight(State.OrigFlashlight)
         Logger.Info(string.format("PAS_HumanFlashlight active (intensity=%.2f, origMuted=%s)",
             modInten, tostring(Logger.IsValidObj(State.OrigFlashlight))))
@@ -919,6 +919,41 @@ function HumanVisuals.UpdateLights(world, slenderActor, camActor)
         pcall(function()
             State.FollowComp:K2_SetWorldLocationAndRotation(flPos, flRot, false, {}, true)
         end)
+    end
+end
+
+function HumanVisuals.IsFlashlightEnabled()
+    return State.FlashlightEnabled == true
+end
+
+function HumanVisuals.SetFlashlightEnabled(enabled)
+    local on = (enabled == true)
+    State.FlashlightEnabled = on
+    local fl = Logger.IsValidObj(State.ModFlashlight) and State.ModFlashlight or State.Flashlight
+    if Logger.IsValidObj(fl) then
+        pcall(function() fl:SetVisibility(on, false) end)
+        pcall(function() fl:SetHiddenInGame(not on, false) end)
+        pcall(function() fl:SetIntensity(on and (State.ModFlashlightIntensity or 60.0) or 0.0) end)
+        pcall(function() if fl.SetAffectsWorld then fl:SetAffectsWorld(on) end end)
+    end
+    if Logger.IsValidObj(State.OrigFlashlight) then
+        SilenceSpotLight(State.OrigFlashlight)
+    end
+    if Logger.IsValidObj(State.PointLight) then
+        if State.PointLightBaseIntensity == nil then
+            pcall(function() State.PointLightBaseIntensity = tonumber(State.PointLight.Intensity) or 5.0 end)
+        end
+        pcall(function() State.PointLight:SetVisibility(on, false) end)
+        pcall(function() State.PointLight:SetIntensity(on and (State.PointLightBaseIntensity or 5.0) or 0.0) end)
+        pcall(function() if State.PointLight.SetAffectsWorld then State.PointLight:SetAffectsWorld(on) end end)
+    end
+    if Logger.IsValidObj(State.PointLight0) then
+        if State.PointLight0BaseIntensity == nil then
+            pcall(function() State.PointLight0BaseIntensity = tonumber(State.PointLight0.Intensity) or 5.0 end)
+        end
+        pcall(function() State.PointLight0:SetVisibility(on, false) end)
+        pcall(function() State.PointLight0:SetIntensity(on and (State.PointLight0BaseIntensity or 5.0) or 0.0) end)
+        pcall(function() if State.PointLight0.SetAffectsWorld then State.PointLight0:SetAffectsWorld(on) end end)
     end
 end
 

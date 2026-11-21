@@ -242,9 +242,12 @@ function SlenderCtrl.Init(world, survivor, mapCfg, hasNavMesh)
     -- Also preload Dramatic audio cue early for abilities
     Bridge.LoadOrFindAsset(Config.ASSETS.SOUND_DRAMATIC)
 
+    local PrologueStory = require("prologue_story")
     local skAsset, animCls, idleAnim, walkAnim = ResolveSlenderAssets(world)
     local survLoc = Bridge.GetActorLoc(survivor) or { X = 42400.0, Y = 54200.0, Z = 9350.0 }
-    local spawnLoc = ChooseForestOrYardSpawn(world, survLoc, survivor, mapCfg, hasNavMesh == true)
+    local spawnLoc = (mapCfg and mapCfg.key == "PROLOGUE" and PrologueStory.IsActive())
+        and PrologueStory.GetInitialSlenderSpawn(world, survLoc, survivor)
+        or ChooseForestOrYardSpawn(world, survLoc, survivor, mapCfg, hasNavMesh == true)
     local faceYaw  = Bridge.YawFromVec(survLoc.X - spawnLoc.X, survLoc.Y - spawnLoc.Y)
 
     local slender = Bridge.SpawnActorDeferred(world, "/Script/Engine.Character", spawnLoc, faceYaw)
@@ -257,6 +260,13 @@ function SlenderCtrl.Init(world, survivor, mapCfg, hasNavMesh)
         local cap = slender.CapsuleComponent
         if Logger.IsValidObj(cap) then
             cap:SetCapsuleSize(Config.SLENDER.CAPSULE_RADIUS, Config.SLENDER.CAPSULE_HALF_HEIGHT, true)
+            if mapCfg and mapCfg.key == "PROLOGUE" and Logger.IsValidObj(survivor) then
+                if cap.IgnoreActorWhenMoving then cap:IgnoreActorWhenMoving(survivor, true) end
+                local survCap = survivor.CapsuleComponent
+                if Logger.IsValidObj(survCap) and survCap.IgnoreActorWhenMoving then
+                    survCap:IgnoreActorWhenMoving(slender, true)
+                end
+            end
         end
     end)
 
@@ -529,13 +539,15 @@ local function OpenNearbyDoorsForSlender()
         local door = dEntry.actor
         if (not dEntry.opened) and Logger.IsValidObj(door) then
             if Bridge.Dist2D(slLoc, dEntry.pos) <= 155.0 and math.abs(slLoc.Z - dEntry.pos.Z) <= 180.0 then
+                local PrologueStory = require("prologue_story")
                 local dn = Logger.SafeName(door)
                 local openAI = true
                 pcall(function() openAI = (door.bOpenableByAI ~= false) end)
-                if string.find(dn, "BP_Door_Main", 1, true) then openAI = true end
-                if string.find(dn, "Locked", 1, true) then openAI = false end
                 local st = 0
                 pcall(function() st = door:GetState() end)
+                if string.find(dn, "BP_Door_Main", 1, true) and st ~= 3 then openAI = true end
+                if string.find(dn, "Locked", 1, true) or st == 3 then openAI = false end
+                if PrologueStory.ShouldBlockDoorAI and PrologueStory.ShouldBlockDoorAI(door) then openAI = false end
                 if openAI and st ~= 1 then
                     dEntry.opened = true
                     pcall(function() door:SetState(State.Actor, 1, false) end)

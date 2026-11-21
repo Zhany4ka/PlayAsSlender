@@ -17,6 +17,7 @@ local HumanPerception  = require("human_perception")
 local HumanFear        = require("human_fear_system")
 local HumanAI          = require("human_ai_controller")
 local GameModeMgr      = require("game_mode_manager")
+local PrologueStory    = require("prologue_story")
 
 Logger.Init()
 ProgressionMgr.Init()
@@ -59,6 +60,7 @@ local function ClearLevelRefs()
     HumanFear.Reset()
     HumanAI.Reset(State.ActiveMapCfg)
     GameModeMgr.Reset()
+    PrologueStory.Reset()
     Bridge.ClearWorldCaches()
     State.InitializedMap  = false
     State.WasPaused       = false
@@ -197,7 +199,7 @@ local function InitPlayableLevel(world, pc, mapCfg)
     NeutralizeIntroCutscenes(world, pc, nil, true)
 
     local gm = Bridge.GetGameMode()
-    local okH, survivor, _, ps = HumanVisuals.Init(world, pc, mapCfg.key)
+    local okH, survivor, ai, ps = HumanVisuals.Init(world, pc, mapCfg.key)
     if not okH then
         -- Retry next ticks cleanly if Pawn wasn't spawned yet right after OpenLevel
         State.InitializedMap = false
@@ -205,8 +207,10 @@ local function InitPlayableLevel(world, pc, mapCfg)
         return
     end
 
+    PrologueStory.Init(world, survivor, ai, mapCfg, HumanVisuals)
+    local navAnchor = (mapCfg.key == "PROLOGUE") and PrologueStory.GetHouseNavAnchor() or nil
     ObjectiveManager.Init(world, survivor, ps, gm, mapCfg.key, hasNavMesh)
-    HumanNav.BuildGraph(world, ObjectiveManager.GetExplorationZones(), Bridge.GetActorLoc(survivor), hasNavMesh, survivor)
+    HumanNav.BuildGraph(world, ObjectiveManager.GetExplorationZones(), Bridge.GetActorLoc(survivor), hasNavMesh, survivor, navAnchor)
     ObjectiveManager.SnapZonesToWalkableGraph(HumanNav, world)
     HumanPerception.Reset()
     HumanFear.Reset()
@@ -216,12 +220,18 @@ local function InitPlayableLevel(world, pc, mapCfg)
     local okS, slPos, slYaw = SlenderCtrl.Init(world, survivor, mapCfg, hasNavMesh)
     if okS then
         CameraCtrl.Init(world, pc, slPos, slYaw)
+        if mapCfg.key == "PROLOGUE" and CameraCtrl.SetNightVision then
+            CameraCtrl.SetNightVision(false)
+        end
     end
     if HumanVisuals.UpdateLights then
         HumanVisuals.UpdateLights(world, SlenderCtrl.GetActor(), CameraCtrl.GetCamActor and CameraCtrl.GetCamActor() or nil)
     end
 
     NeutralizeIntroCutscenes(world, pc, survivor, true)
+    if mapCfg.key == "PROLOGUE" then
+        PrologueStory.DismissPrologueIntro(world, pc)
+    end
     Overlay.Init(pc, "GAME")
     MenuIntegration.EnsureButtonHook()
     Overlay.HideVanillaHUD(true)
@@ -409,6 +419,9 @@ local function OnTick()
         CameraCtrl.Update(world, pc, dt, slender, survivor, matchEnded)
         SlenderCtrl.Update(world, pc, dt, CameraCtrl.GetYaw(), survivor, CameraCtrl.IsFreeCam() or matchEnded)
         if not matchEnded then
+            if PrologueStory.IsActive() then
+                PrologueStory.TickAmbient(world, pc, dt, HumanVisuals)
+            end
             local canDiscoverObj = (GameModeMgr.GetElapsed() >= (Config.HUMAN.START_OBJECTIVE_GRACE_SEC or 5.0))
             Abilities.Update(world, pc, dt, slender, survivor, humanFwd, HumanFear, HumanAI)
             HumanAI.Update(world, dt, survivor, ai, slender, Abilities, false, canDiscoverObj)
@@ -456,6 +469,13 @@ local function OnTick()
             end
             local huntStageName = (hudMetrics and hudMetrics.stageName) or fallbackStageName or "STAGE I: STALKING"
             local closestDistM  = hudMetrics and hudMetrics.closestDistM or nil
+            if State.ActiveMapCfg and State.ActiveMapCfg.key == "PROLOGUE" and PrologueStory.IsActive() then
+                huntStageName = PrologueStory.GetStageName()
+                local tgt = PrologueStory.GetHudObjectiveTarget()
+                if tgt then
+                    closestDistM = Bridge.Dist(hLoc, tgt) / 100.0
+                end
+            end
 
             Overlay.UpdateGame({
                 mapKey         = State.ActiveMapCfg.key,

@@ -479,7 +479,7 @@ local function BuildNonNavMeshHouseGraph(world, startPos, survivor)
         end
     end
 
-    -- Connect Start & DoorTunnel SideA/SideB nodes to up to 6 nearest walkable grid nodes within 420 cm
+    -- Connect Start & DoorTunnel SideA/SideB nodes to up to 6 nearest walkable grid nodes within 540 cm
     local seedIds = { 1 }
     for _, t in ipairs(tunnels) do
         table.insert(seedIds, t.idA)
@@ -491,7 +491,7 @@ local function BuildNonNavMeshHouseGraph(world, startPos, survivor)
         for _, gId in ipairs(gridNodeIds) do
             if gId ~= sId then
                 local dist2 = Bridge.Dist2D(sPos, nodes[gId].pos)
-                if dist2 <= 420.0 then
+                if dist2 <= 540.0 then
                     table.insert(nearCands, { id = gId, d = Bridge.Dist(sPos, nodes[gId].pos) })
                 end
             end
@@ -500,9 +500,19 @@ local function BuildNonNavMeshHouseGraph(world, startPos, survivor)
         local linked = 0
         for _, c in ipairs(nearCands) do
             if linked >= 6 then break end
-            if HumanNav.IsSegmentWalkable(world, sPos, nodes[c.id].pos, graphIgnore, 22.0) then
+            if Bridge.Dist2D(sPos, nodes[c.id].pos) <= 420.0
+                and HumanNav.IsSegmentWalkable(world, sPos, nodes[c.id].pos, graphIgnore, 22.0) then
                 AddUndirectedEdge(nodes, sId, c.id, c.d)
                 linked = linked + 1
+            end
+        end
+        if linked == 0 then
+            for _, c in ipairs(nearCands) do
+                if linked >= 3 then break end
+                if HumanNav.IsSegmentWalkable(world, sPos, nodes[c.id].pos, graphIgnore, 10.0) then
+                    AddUndirectedEdge(nodes, sId, c.id, c.d)
+                    linked = linked + 1
+                end
             end
         end
     end
@@ -522,19 +532,43 @@ local function BuildNonNavMeshHouseGraph(world, startPos, survivor)
         end
     end
 
-    -- Connected-component filter from StartNode (id 1): keep ONLY reachable nodes & remap IDs cleanly
-    local visited = { [1] = true }
-    local compQ = { 1 }
-    local ch = 1
-    while ch <= #compQ do
-        local cur = compQ[ch]
-        ch = ch + 1
-        for _, edge in ipairs(nodes[cur].adj) do
-            if not visited[edge.to] then
-                visited[edge.to] = true
-                table.insert(compQ, edge.to)
+    -- Connected-component filter from StartNode (id 1): bridge narrow interior doorways (halfW=10) if any house wing separated
+    local function RunReachableFlood()
+        local vis = { [1] = true }
+        local q = { 1 }
+        local h = 1
+        while h <= #q do
+            local cur = q[h]
+            h = h + 1
+            for _, edge in ipairs(nodes[cur].adj) do
+                if not vis[edge.to] then
+                    vis[edge.to] = true
+                    table.insert(q, edge.to)
+                end
             end
         end
+        return vis
+    end
+
+    local visited = RunReachableFlood()
+    for _ = 1, 2 do
+        local bridgedAny = false
+        for idA = 1, #nodes do
+            if visited[idA] and math.abs(nodes[idA].pos.Z - 9108.0) <= 220.0 then
+                for idB = 1, #nodes do
+                    if (not visited[idB]) and math.abs(nodes[idB].pos.Z - nodes[idA].pos.Z) <= 130.0 then
+                        local d = Bridge.Dist(nodes[idA].pos, nodes[idB].pos)
+                        if d <= 360.0 and HumanNav.IsSegmentWalkable(world, nodes[idA].pos, nodes[idB].pos, graphIgnore, 10.0) then
+                            AddUndirectedEdge(nodes, idA, idB, d)
+                            bridgedAny = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if not bridgedAny then break end
+        visited = RunReachableFlood()
     end
 
     local oldToNew = {}
@@ -672,7 +706,7 @@ local function BuildNonNavMeshGenericGraph(world, startPos, survivor, zones)
     return nodes
 end
 
-function HumanNav.BuildGraph(world, zones, startPos, hasNavMesh, survivor)
+function HumanNav.BuildGraph(world, zones, startPos, hasNavMesh, survivor, anchorOverride)
     HumanNav.Reset()
     if not zones then return false end
     State.HasNavMesh = (hasNavMesh == true)
@@ -706,16 +740,16 @@ function HumanNav.BuildGraph(world, zones, startPos, hasNavMesh, survivor)
 
     local nodes = {}
     if not State.HasNavMesh then
-        local sp = startPos or Bridge.GetActorLoc(survivor)
+        local sp = anchorOverride or startPos or Bridge.GetActorLoc(survivor)
         if sp and InYardBox(sp.X, sp.Y) and sp.Z >= 8800.0 and sp.Z <= 9420.0 then
-            nodes = BuildNonNavMeshHouseGraph(world, startPos, survivor)
+            nodes = BuildNonNavMeshHouseGraph(world, anchorOverride or startPos, survivor)
             if #nodes < 15 then
                 Logger.Warn("HumanNav HouseGraph too small (" .. tostring(#nodes) .. "); falling back to Generic BFS")
                 State.DoorTunnelCount = 0
-                nodes = BuildNonNavMeshGenericGraph(world, startPos, survivor, zones)
+                nodes = BuildNonNavMeshGenericGraph(world, sp, survivor, zones)
             end
         else
-            nodes = BuildNonNavMeshGenericGraph(world, startPos, survivor, zones)
+            nodes = BuildNonNavMeshGenericGraph(world, sp, survivor, zones)
         end
     else
         local function TryAddNode(pos, name, isLandmark, minSep)
@@ -1202,13 +1236,15 @@ function HumanNav.TryOpenNearbyDoors(survivor, humanPos)
     local now = os.clock()
     if (now - State.LastDoorCheckTime) < 0.15 or #State.Doors == 0 then return end
     State.LastDoorCheckTime = now
+    local PrologueStory = require("prologue_story")
 
     for _, dEntry in ipairs(State.Doors) do
         local door = dEntry.actor
         if Logger.IsValidObj(door) then
             local d2D = Bridge.Dist2D(humanPos, dEntry.pos)
             local dZ  = math.abs(humanPos.Z - dEntry.pos.Z)
-            if d2D <= 270.0 and dZ <= 190.0 and IsDoorOpenableAI(door) then
+            if d2D <= 270.0 and dZ <= 190.0 and IsDoorOpenableAI(door)
+                and (not (PrologueStory.ShouldBlockDoorAI and PrologueStory.ShouldBlockDoorAI(door))) then
                 local st = 0
                 pcall(function() st = door:GetState() end)
                 if st ~= 1 then

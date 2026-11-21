@@ -237,6 +237,13 @@ function CameraCtrl.ToggleNightVision()
     return State.NightVisionOn
 end
 
+function CameraCtrl.SetNightVision(enabled)
+    State.NightVisionOn = (enabled == true)
+    ApplyVisionStateToScene()
+    Logger.Info("Slenderman Night Vision = " .. tostring(State.NightVisionOn))
+    return State.NightVisionOn
+end
+
 function CameraCtrl.GetVisionInfo()
     local vl = State.VisionLight
     local valid = Logger.IsValidObj(vl)

@@ -28,6 +28,7 @@ main.lua (ExecuteInGameThreadAfterFrames loop, World transition & Travel FSM)
  ├── human_perception.lua        (Non-omniscient FOV cones, LineTraceSingle occlusion, DangerZones)
  ├── human_fear_system.lua       (Distance/gaze/trauma/stage fear curves, Ambush Shocks, Breakdown timer)
  ├── human_ai_controller.lua     (9-state Survivor FSM, dynamic juking, mobile recovery)
+ ├── prologue_story.lua          (Chapter 1 authentic 5-stage Prologue storyline & Nightfall state machine)
  ├── game_mode_manager.lua       (Hunt Stages I-IV, Win/Loss rules, Hunter Score & Rank S-D)
  └── debug_overlay.lua           (UMG HUD, Predator Sense, Telemetry dossier, End Screen + ui_theme.lua)
 ```

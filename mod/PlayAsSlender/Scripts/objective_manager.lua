@@ -187,11 +187,17 @@ local function InitLevel02EightPages(world, survivor)
     end
 end
 
-local function UnlockAndOpenMainDoors(survivor)
+local function UnlockAndOpenMainDoors(survivor, mapKey)
     for _, door in ipairs(FindAllOf("BP_DoorBase_C") or {}) do
         if Logger.IsValidObj(door) then
             local dn = Logger.SafeName(door)
-            if string.find(dn, "BP_Door_Main", 1, true) then
+            local match = false
+            if mapKey == "PROLOGUE" then
+                match = (dn == "BP_Door_Main")
+            else
+                match = (string.find(dn, "BP_Door_Main", 1, true) ~= nil)
+            end
+            if match then
                 pcall(function() door:SetState(survivor, 1, false) end)
                 pcall(function() door:RequestStateChange(survivor, 1) end)
                 pcall(function()
@@ -260,8 +266,8 @@ local function InitLevel01Prologue(world, survivor)
     State.TotalCount = math.max(1, #State.Pages)
     Logger.Info(string.format("ObjectiveManager [Level01_Prologue] indexed %d 1F candidate house objectives.", #State.Pages))
 
-    -- Ensure House main front & back doors are unlocked, open, and clear of navigation blockers
-    UnlockAndOpenMainDoors(survivor)
+    -- Ensure House main front door is unlocked, open, and clear of navigation blockers (keep BP_Door_Main2 locked until Kate's Room trigger on PROLOGUE)
+    UnlockAndOpenMainDoors(survivor, "PROLOGUE")
 
     -- Curated grounded exploration zones across Front Driveway, Porch, House 1F Rooms, Back Yard & Side Garden
     local rawZones = {
@@ -984,8 +990,25 @@ function ObjectiveManager.CollectPage(world, survivor, pageId, bypassDistCheck)
     return true, State.CollectedCount
 end
 
-function ObjectiveManager.GetCollectedCount() return State.CollectedCount end
-function ObjectiveManager.GetTotalCount()     return State.TotalCount end
+function ObjectiveManager.GetCollectedCount()
+    if State.MapKey == "PROLOGUE" then
+        local PrologueStory = require("prologue_story")
+        if PrologueStory.IsActive() then
+            return PrologueStory.GetCompletedCount()
+        end
+    end
+    return State.CollectedCount
+end
+
+function ObjectiveManager.GetTotalCount()
+    if State.MapKey == "PROLOGUE" then
+        local PrologueStory = require("prologue_story")
+        if PrologueStory.IsActive() then
+            return PrologueStory.GetTotalCount()
+        end
+    end
+    return State.TotalCount
+end
 
 function ObjectiveManager.GetKnownCount()
     local c = 0

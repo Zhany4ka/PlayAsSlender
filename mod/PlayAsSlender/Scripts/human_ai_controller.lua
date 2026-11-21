@@ -55,6 +55,21 @@ function HumanAI.GetStamina()          return State.Stamina end
 function HumanAI.GetGoalLabel()        return State.GoalLabel end
 function HumanAI.GetTransitionReason() return State.LastReason end
 
+function HumanAI.SetTestExploreZone(zoneName)
+    for _, z in ipairs(ObjectiveManager.GetExplorationZones()) do
+        if z.name == zoneName and z.pts and #z.pts > 0 then
+            State.CurZone        = z
+            State.CurPtIdx       = 1
+            State.TargetPageId   = nil
+            State.CurrentState   = "Exploring"
+            State.StateTimer     = 0.0
+            State.RecoverGoalSet = false
+            return z.pts[1].pos
+        end
+    end
+    return nil
+end
+
 function HumanAI.Transition(newState, reason)
     if State.CurrentState == newState then return end
     State.PrevState    = State.CurrentState
@@ -446,6 +461,21 @@ function HumanAI.Update(world, dt, survivor, ai, slender, abilities, frozen, can
     end
     HumanVisuals.SetMoveSpeed(desiredSpeed)
     pcall(function() survivor.Stamina = State.Stamina end)
+
+    local PrologueStory = require("prologue_story")
+    if PrologueStory.IsActive() then
+        PrologueStory.UpdateAI(world, dt, survivor, ai, slender, State, {
+            HumanNav        = HumanNav,
+            HumanVisuals    = HumanVisuals,
+            HumanPerception = HumanPerception,
+            HumanFear       = HumanFear,
+            CameraCtrl      = require("camera_controller"),
+            SlenderCtrl     = require("slender_controller"),
+            Overlay         = require("debug_overlay"),
+        })
+        SafeUpdateLights(world, slender)
+        return
+    end
 
     State.FsmAccum = State.FsmAccum + dt
     if State.FsmAccum >= (1.0 / Config.RATES.FSM_HZ) then

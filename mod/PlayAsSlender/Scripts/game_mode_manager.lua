@@ -48,6 +48,11 @@ function GameModeMgr.GetResult()
 end
 
 function GameModeMgr.GetHuntStage(collected, total)
+    local PrologueStory = require("prologue_story")
+    if PrologueStory.IsActive() then
+        local st = PrologueStory.GetStage()
+        return st, PrologueStory.GetStageName(st)
+    end
     local c = tonumber(collected)
     local t = tonumber(total)
     if c == nil then c = tonumber(ObjectiveManager.GetCollectedCount()) or 0 end
@@ -175,8 +180,19 @@ function GameModeMgr.Update(world, dt, slender, survivor)
     local total     = ObjectiveManager.GetTotalCount()
     local stageNum, stageName = GameModeMgr.GetHuntStage(collected, total)
 
-    -- 1. Human Victory: All 8 pages collected
-    if collected >= total then
+    -- 1. Human Victory: Chapter 1 Prologue Park Gate OR All 8 pages collected
+    local PrologueStory = require("prologue_story")
+    if PrologueStory.IsActive() then
+        if PrologueStory.IsParkGateReached() then
+            FinalizeMatch(
+                world,
+                "HUMAN_WIN",
+                "SURVIVOR ESCAPED TO OAKSIDE PARK",
+                "Lauren abandoned her car, grabbed Kate's flashlight & bedroom note, fled into the night woods, and reached Oakside Park."
+            )
+            return State.Result
+        end
+    elseif collected >= total then
         FinalizeMatch(
             world,
             "HUMAN_WIN",
@@ -229,6 +245,17 @@ function GameModeMgr.Update(world, dt, slender, survivor)
         Logger.Info(string.format("Hunt escalated to %s (%d/%d objectives)", stageName, collected, total))
     end
 
+    return State.Result
+end
+
+function GameModeMgr.ForceEndForTest(world, result, title, reason)
+    State.Result = "ACTIVE"
+    FinalizeMatch(
+        world,
+        result or "SLENDER_WIN",
+        title or ((result == "HUMAN_WIN") and "HUMAN SURVIVED — ALL OBJECTIVES COMPLETED" or "SLENDERMAN VICTORY — PSYCHOLOGICAL BREAKDOWN"),
+        reason or ((result == "HUMAN_WIN") and "The Human gathered the objectives and escaped." or "Overwhelming terror shattered the Human's sanity.")
+    )
     return State.Result
 end
 
