@@ -1,0 +1,14 @@
+# Logs & runtime outputs
+*.log
+*.sav
+*.tmp
+PlayAsSlender_progress.ini
+UE4SS.log
+ue4ss/
+
+# OS & editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+*.pyc
+__pycache__/
