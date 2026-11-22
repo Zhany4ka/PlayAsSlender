@@ -10,6 +10,7 @@ local Overlay          = require("debug_overlay")
 local CameraCtrl       = require("camera_controller")
 local SlenderCtrl      = require("slender_controller")
 local Abilities        = require("slender_abilities")
+local HammerMgr        = require("slender_hammer")
 local HumanVisuals     = require("human_visuals")
 local ObjectiveManager = require("objective_manager")
 local HumanNav         = require("human_navigation")
@@ -53,6 +54,7 @@ local function ClearLevelRefs()
     CameraCtrl.Reset()
     SlenderCtrl.Reset()
     Abilities.Reset()
+    HammerMgr.Reset()
     HumanVisuals.Reset()
     ObjectiveManager.Reset()
     HumanNav.Reset()
@@ -220,6 +222,7 @@ local function InitPlayableLevel(world, pc, mapCfg)
     local okS, slPos, slYaw = SlenderCtrl.Init(world, survivor, mapCfg, hasNavMesh)
     if okS then
         CameraCtrl.Init(world, pc, slPos, slYaw)
+        HammerMgr.Init(world, SlenderCtrl.GetActor())
         if mapCfg.key == "PROLOGUE" and CameraCtrl.SetNightVision then
             CameraCtrl.SetNightVision(false)
         end
@@ -424,6 +427,7 @@ local function OnTick()
             end
             local canDiscoverObj = (GameModeMgr.GetElapsed() >= (Config.HUMAN.START_OBJECTIVE_GRACE_SEC or 5.0))
             Abilities.Update(world, pc, dt, slender, survivor, humanFwd, HumanFear, HumanAI)
+            HammerMgr.Update(world, pc, dt, slender, survivor, CameraCtrl, HumanFear, CameraCtrl.IsFreeCam())
             HumanAI.Update(world, dt, survivor, ai, slender, Abilities, false, canDiscoverObj)
             GameModeMgr.Update(world, dt, slender, survivor)
         else
@@ -459,6 +463,7 @@ local function OnTick()
             local hLoc = HumanVisuals.GetLocation() or { X = 0, Y = 0, Z = 0 }
             local mem  = HumanPerception.GetMemory()
             local uiAb = Abilities.GetUiState()
+            local uiHm = HammerMgr.GetUiState()
             local curRes, _, curEndSum = GameModeMgr.GetResult()
             local pagesCol = ObjectiveManager.GetCollectedCount()
             local pagesTot = ObjectiveManager.GetTotalCount()
@@ -501,6 +506,9 @@ local function OnTick()
                 cdTerrify      = uiAb.cdTr,
                 dreadActive    = uiAb.dreadActive,
                 terrifyFlash   = uiAb.terrifyFlash,
+                hammerEquipped = uiHm.equipped,
+                cdHammer       = uiHm.cd,
+                hammerCooldownMax = uiHm.cdMax,
                 freeCam        = CameraCtrl.IsFreeCam(),
                 winner         = (curRes ~= "ACTIVE") and curRes or nil,
                 endSummary     = curEndSum,

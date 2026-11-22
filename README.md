@@ -35,6 +35,7 @@
   - `Q` — **Телепортация** (проверка грунта, габаритов, запрет телепорта прямо перед взглядом человека ближе 12 м, КД `6 с`)
   - `E` — **Психологическое давление / Psychic Dread** (аура на `28 м`, длительность `4.5 с`, КД `10 с`; при скрытом преследовании в `8–24 м` ускоряет откат Terrify на `+25%`)
   - `F` — **Активное устрашение / Terrify** (всплеск страха `+22..+32`, бонус `+6` и прерывание цели при атаке рядом с объектом или в момент подбора, КД `14 с`; раскрывает 3D-щупальца)
+  - `R` — **Молот разрушения (появляется только по кнопке)** (скрыт в начале матча; `ЛКМ` — точный удар с переключением мелких/средних объектов в реальную физику столкновений Chaos в стиле GMod, выбиванием дверей/окон и рубкой деревьев; `ПКМ` — тяжёлый удар с радиальной ударной волной `3.4 м`, разносящий стены, заборы и объекты в текстурированные 3D-обломки в стиле Teardown)
 - **Ночное зрение Слендермена и чистый экран без глюков**: мягкое всенаправленное освещение (`PAS_SlenderVisionLight` + экспозиция камеры) позволяет свободно ориентироваться и видеть окружение даже в полной темноте помещений без эффекта фонарика (переключение клавишей `V`, включено по умолчанию). Штатные VHS-помехи, хроматические сбои и дрожание камеры при сближении с выжившим полностью подавлены.
 - **Полоса здоровья над головой выжившего**: плавающий нативный индикатор (`SURVIVOR XX%`) в реальном времени следует за положением головы цели (`WidgetLayoutLibrary` + проверка прямой видимости камеры) и меняет цвет с зелёного на янтарный и алый по мере приближения к психологическому слому.
 - **Оформление, экран загрузки и экран итогов**: кастомные загрузочные экраны, индикатор **Predator Sense** в HUD, диагностическое окно выжившего (`Tab` / `F1`), итоговое досье с прогресс-барами `SANITY SHATTERED` и `OBJECTIVES DENIED`, счётом **Hunter Score** и **рангами S / A / B / C / D**, а также нативными кнопками `NEXT LEVEL`, `RESTART [F8]` и `MAIN MENU`.
@@ -106,6 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\installer\install.ps1 -GameDir "D:\Ga
 | `Q` | В игре | **Телепортация** (проверка поверхности, препятствий и поля зрения человека; КД `6 с`) |
 | `E` | В игре | **Психологический ужас / Psychic Dread** (`4.5 с`, радиус `28 м`, КД `10 с`) |
 | `F` | В игре | **Активное устрашение / Terrify** (`+22..+32` страха, до `15.5 м` по LOS / `6.5 м` вслепую; КД `14 с`) |
+| `R` | В игре | Достать / убрать **Молот разрушения** (скрыт по умолчанию; `ЛКМ` — физический удар GMod, `ПКМ` — пролом стен на обломки Teardown) |
 | `Tab` или `F1` | В игре | Показать / скрыть панель **Survivor Telemetry** (состояние ИИ, дистанция, цель, FPS) |
 | `V` | В игре | Включить / выключить **ночное зрение Слендермена** (по умолчанию включено) |
 | `F3` | В игре | Свободная камера (**FreeCam**; вверх — `SpaceBar`, вниз — `LeftControl`) |
@@ -193,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File .\installer\uninstall.ps1
   powershell -ExecutionPolicy Bypass -File .\installer\install.ps1 -GameDir "D:\Games\Slender The Arrival"
   ```
 - **Manual**: Extract `tools\UE4SS_v4.0.0.zip` into `<GameDir>\SlenderTheArrival\Binaries\Win64\`, copy `installer\templates\UE4SS-settings.ini` to `Binaries\Win64\ue4ss\`, `installer\templates\mods.txt` to `Binaries\Win64\ue4ss\Mods\`, and copy `mod\PlayAsSlender\` into `Binaries\Win64\ue4ss\Mods\PlayAsSlender\`.
-- **Controls** (configurable in `keybinds.ini`): `WASD` Move, `LeftShift` Glide, `Mouse` Camera, `Q` Teleport (`6s`), `E` Psychic Dread (`10s`), `F` Terrify (`14s`), `V` Night Vision toggle, `Tab`/`F1` Telemetry, `F3` FreeCam, `F8` Restart, `F9`/`F7` Menu Quick Start, `Enter` Next Chapter, `M`/`BackSpace` Main Menu.
+- **Controls** (configurable in `keybinds.ini`): `WASD` Move, `LeftShift` Glide, `Mouse` Camera, `Q` Teleport (`6s`), `E` Psychic Dread (`10s`), `F` Terrify (`14s`), `R` Toggle Destruction Hammer (`LMB` Chaos prop physics/smash, `RMB` Teardown wall breach & radial shockwave), `V` Night Vision toggle, `Tab`/`F1` Telemetry, `F3` FreeCam, `F8` Restart, `F9`/`F7` Menu Quick Start, `Enter` Next Chapter, `M`/`BackSpace` Main Menu.
 - **Uninstall**:
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\installer\uninstall.ps1

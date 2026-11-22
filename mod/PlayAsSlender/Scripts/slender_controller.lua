@@ -38,6 +38,7 @@ function SlenderCtrl.Reset()
 end
 
 function SlenderCtrl.GetActor()     return State.Actor end
+function SlenderCtrl.GetMeshComp()  return State.MeshComp end
 function SlenderCtrl.GetAnimState() return State.AnimState end
 
 function SlenderCtrl.GetLocation()

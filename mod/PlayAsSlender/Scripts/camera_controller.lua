@@ -21,6 +21,10 @@ local State = {
     LastViewRot       = { Pitch = -12.0, Yaw = 0.0, Roll = 0.0 },
     LastViewForward   = { X = 1.0, Y = 0.0, Z = 0.0 },
     FovDeg            = 90.0,
+    ShakeIntensity    = 0.0,
+    ShakeTimeLeft     = 0.0,
+    ShakeDuration     = 0.25,
+    ShakeTime         = 0.0,
 }
 
 function CameraCtrl.Reset()
@@ -38,6 +42,9 @@ function CameraCtrl.Reset()
     State.LastViewPos       = nil
     State.LastViewRot       = { Pitch = -12.0, Yaw = 0.0, Roll = 0.0 }
     State.FovDeg            = 90.0
+    State.ShakeIntensity    = 0.0
+    State.ShakeTimeLeft     = 0.0
+    State.ShakeTime         = 0.0
 end
 
 local function ApplyVisionPostProcess(camComp, enabled)
@@ -286,6 +293,18 @@ function CameraCtrl.NotifyTeleport()
     State.TeleportBlendLeft = 0.35
 end
 
+function CameraCtrl.AddImpactShake(intensity, duration)
+    local mag = tonumber(intensity) or 6.0
+    local dur = tonumber(duration) or 0.22
+    if mag <= 0.0 or dur <= 0.0 then return end
+    if State.ShakeTimeLeft <= 0.0 or mag >= State.ShakeIntensity then
+        State.ShakeIntensity = mag
+        State.ShakeDuration  = dur
+        State.ShakeTimeLeft  = dur
+        State.ShakeTime      = 0.0
+    end
+end
+
 function CameraCtrl.SetViewAngles(pitch, yaw)
     State.Pitch = Bridge.Clamp(pitch, Config.CAMERA.PITCH_MIN, Config.CAMERA.PITCH_MAX)
     State.Yaw   = Bridge.NormalizeAngle(yaw)
@@ -416,8 +435,31 @@ function CameraCtrl.Update(world, pc, dt, slender, survivor, freezeLook)
         aimTarget.Z - State.CurrentCamPos.Z
     )
 
+    local finalPos = State.CurrentCamPos
+    if State.ShakeTimeLeft > 0.0 then
+        State.ShakeTimeLeft = math.max(0.0, State.ShakeTimeLeft - dt)
+        State.ShakeTime     = State.ShakeTime + dt
+        local decay = (State.ShakeDuration > 0.0) and (State.ShakeTimeLeft / State.ShakeDuration) or 0.0
+        local wave  = math.sin(State.ShakeTime * 46.0)
+        local wave2 = math.cos(State.ShakeTime * 61.0)
+        local jolt  = State.ShakeIntensity * decay * decay
+        finalPos = {
+            X = State.CurrentCamPos.X + rx * (wave2 * jolt * 0.55),
+            Y = State.CurrentCamPos.Y + ry * (wave2 * jolt * 0.55),
+            Z = State.CurrentCamPos.Z + wave * jolt * 0.65,
+        }
+        camRot = {
+            Pitch = camRot.Pitch - math.abs(wave) * jolt * 0.16,
+            Yaw   = camRot.Yaw + wave2 * jolt * 0.09,
+            Roll  = wave * jolt * 0.12,
+        }
+        if State.ShakeTimeLeft <= 0.0 then
+            State.ShakeIntensity = 0.0
+        end
+    end
+
     pcall(function()
-        State.CamActor:K2_SetActorLocationAndRotation(State.CurrentCamPos, camRot, false, {}, true)
+        State.CamActor:K2_SetActorLocationAndRotation(finalPos, camRot, false, {}, true)
     end)
 
     if Logger.IsValidObj(State.VisionLight) and State.NightVisionOn then
@@ -426,7 +468,7 @@ function CameraCtrl.Update(world, pc, dt, slender, survivor, freezeLook)
         end)
     end
 
-    State.LastViewPos     = State.CurrentCamPos
+    State.LastViewPos     = finalPos
     State.LastViewRot     = camRot
     State.LastViewForward = { X = fx, Y = fy, Z = fz }
 end

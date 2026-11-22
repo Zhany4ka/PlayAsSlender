@@ -188,6 +188,14 @@ function Bridge.Clamp(v, lo, hi)
     return v
 end
 
+function Bridge.Vec(x, y, z)
+    return { X = x or 0.0, Y = y or 0.0, Z = z or 0.0 }
+end
+
+function Bridge.Rot(p, y, r)
+    return { Pitch = p or 0.0, Yaw = y or 0.0, Roll = r or 0.0 }
+end
+
 function Bridge.Lerp(a, b, t)
     return a + (b - a) * t
 end
@@ -309,14 +317,82 @@ function Bridge.LineTrace(worldContext, startPos, endPos, ignoreActors, traceCha
     end
     local hitActor = nil
     pcall(function() hitActor = UEHelpers.GetActorFromHitResult(hit) end)
+    local hitComp = nil
+    pcall(function()
+        if hit.Component then
+            local okG, g = pcall(function() return hit.Component:Get() end)
+            if okG and Logger.IsValidObj(g) then
+                hitComp = g
+            elseif Logger.IsValidObj(hit.Component) then
+                hitComp = hit.Component
+            end
+        end
+    end)
+    if not Logger.IsValidObj(hitActor) and Logger.IsValidObj(hitComp) then
+        pcall(function() hitActor = hitComp:GetOwner() end)
+    end
+    local hitItem = nil
+    pcall(function() hitItem = hit.Item end)
+    local hitPhysMat = nil
+    pcall(function()
+        if hit.PhysMaterial then
+            local okP, pm = pcall(function() return hit.PhysMaterial:Get() end)
+            if okP and Logger.IsValidObj(pm) then
+                hitPhysMat = pm
+            elseif Logger.IsValidObj(hit.PhysMaterial) then
+                hitPhysMat = hit.PhysMaterial
+            end
+        end
+    end)
     local info = {
         Actor        = hitActor,
+        Component    = hitComp,
+        Item         = hitItem,
+        PhysMaterial = hitPhysMat,
         Distance     = hit.Distance or Bridge.Dist(startPos, endPos),
         Location     = hit.Location and { X = hit.Location.X, Y = hit.Location.Y, Z = hit.Location.Z } or nil,
         ImpactPoint  = hit.ImpactPoint and { X = hit.ImpactPoint.X, Y = hit.ImpactPoint.Y, Z = hit.ImpactPoint.Z } or nil,
         ImpactNormal = hit.ImpactNormal and { X = hit.ImpactNormal.X, Y = hit.ImpactNormal.Y, Z = hit.ImpactNormal.Z } or nil,
     }
     return true, info
+end
+
+function Bridge.GetComponentBounds(comp)
+    if not Logger.IsValidObj(comp) then return nil, nil, 0 end
+    local ksl = Bridge.GetKismetSystem()
+    if not ksl then return nil, nil, 0 end
+    local orig = { X = 0, Y = 0, Z = 0 }
+    local ext  = { X = 0, Y = 0, Z = 0 }
+    local rad  = 0
+    local ok = pcall(function()
+        local outRad = { 0 }
+        ksl:GetComponentBounds(comp, orig, ext, outRad)
+        rad = tonumber(outRad[1]) or 0
+    end)
+    if not ok then return nil, nil, 0 end
+    return orig, ext, rad
+end
+
+function Bridge.SphereOverlapComponents(world, center, radius, ignoreActors)
+    if not Logger.IsValidObj(world) or not center then return {} end
+    local ksl = Bridge.GetKismetSystem()
+    if not ksl then return {} end
+    local outComps = {}
+    local ok, res = pcall(function()
+        return ksl:SphereOverlapComponents(
+            world,
+            Bridge.Vec(center.X, center.Y, center.Z),
+            tonumber(radius) or 150.0,
+            {},
+            nil,
+            ignoreActors or {},
+            outComps
+        )
+    end)
+    if ok and res and type(outComps) == "table" then
+        return outComps
+    end
+    return {}
 end
 
 function Bridge.HasLineOfSight(worldContext, fromPos, toPos, ignoreActors, targetActor)

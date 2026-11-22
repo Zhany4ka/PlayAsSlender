@@ -242,11 +242,19 @@ local function BuildAmbientLayer(wt, cv)
         SetSlotAnchored(s, 60.0, 0.0, 1.0, 0.5, 1.0, 0.5, 8)
     end
 
+    local cross = UITheme.CreateAccentLine(wt, "PAS_HammerCrosshair", 6.0, 6.0, { R = 0.94, G = 0.88, B = 0.82, A = 0.88 })
+    if Logger.IsValidObj(cross) then
+        local s = cv:AddChildToCanvas(cross)
+        SetSlotAnchored(s, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 32)
+        pcall(function() cross:SetVisibility(1) end)
+    end
+
     return {
-        CamFrame = camImg,
-        Vignette = vigImg,
-        TendrilL = tendrilL,
-        TendrilR = tendrilR,
+        CamFrame  = camImg,
+        Vignette  = vigImg,
+        TendrilL  = tendrilL,
+        TendrilR  = tendrilR,
+        Crosshair = cross,
     }
 end
 
@@ -477,6 +485,7 @@ local function BuildAbilitiesBar(wt, cv)
     local cTp = BuildAbilityCard(wt, "PAS_Abil_TP", Config.KEYS.TELEPORT,      UITheme.GetTex("ICON_SPINNER"),   20.0, 20.0, "TELEPORT")
     local cDr = BuildAbilityCard(wt, "PAS_Abil_DR", Config.KEYS.PSYCHIC_DREAD, UITheme.GetTex("TENDRIL_2"),      28.0, 14.0, "DREAD")
     local cTr = BuildAbilityCard(wt, "PAS_Abil_TR", Config.KEYS.TERRIFY,       UITheme.GetTex("SKETCH_TERRIFY"), 16.0, 22.0, "TERRIFY")
+    local cHm = BuildAbilityCard(wt, "PAS_Abil_HM", Config.KEYS.TOGGLE_HAMMER or "R", UITheme.GetTex("TENDRIL_1") or UITheme.GetTex("ICON_SPINNER"), 24.0, 14.0, "HAMMER")
 
     local fcContainer = CreateHudPanel(wt, "PAS_Abil_FC", UITheme.COLORS.PANEL_DARK, 10, 7, 10, 7)
     local fcTxt = UITheme.CreateText(wt, "PAS_Abil_FCT", "FREE CAM", "CAMCORDER", 12.0, UITheme.COLORS.AMBER, 40, 1)
@@ -489,6 +498,10 @@ local function BuildAbilitiesBar(wt, cv)
     if cDr then AddBoxChild(rootHB, cDr.Root, 1, 2) end
     AddBoxChild(rootHB, UITheme.CreateSpacer(wt, "PAS_Abil_SP2", 12, 1), 1, 2)
     if cTr then AddBoxChild(rootHB, cTr.Root, 1, 2) end
+    if cHm then
+        AddBoxChild(rootHB, UITheme.CreateSpacer(wt, "PAS_Abil_SP4", 12, 1), 1, 2)
+        AddBoxChild(rootHB, cHm.Root, 1, 2)
+    end
     if fcContainer then
         AddBoxChild(rootHB, UITheme.CreateSpacer(wt, "PAS_Abil_SP3", 10, 1), 1, 2)
         AddBoxChild(rootHB, fcContainer.Root, 1, 2)
@@ -501,6 +514,7 @@ local function BuildAbilitiesBar(wt, cv)
         Tp      = cTp,
         Dr      = cDr,
         Tr      = cTr,
+        Hm      = cHm,
         FreeCam = fcContainer and fcContainer.Root or nil,
     }
 end
@@ -1072,6 +1086,7 @@ function Overlay.SetModeVisibility(mode)
         SetWidgetVisible("AmbVig", State.Widgets.Ambient.Vignette, isGame)
         SetWidgetVisible("AmbTL",  State.Widgets.Ambient.TendrilL, false)
         SetWidgetVisible("AmbTR",  State.Widgets.Ambient.TendrilR, false)
+        SetWidgetVisible("HammerCrosshair", State.Widgets.Ambient.Crosshair, false)
     end
     if State.Widgets.MenuPanel  then SetWidgetVisible("MenuPanel",  State.Widgets.MenuPanel.Root,  isMenu) end
     if State.Widgets.SurvivorHP then SetWidgetVisible("SurvHP",     State.Widgets.SurvivorHP.Root, false) end
@@ -1230,9 +1245,43 @@ function Overlay.UpdateGame(info)
         UpdateAbilitySlot("TP", ab.Tp, info.cdTeleport, Config.ABILITIES.TELEPORT_COOLDOWN, false)
         UpdateAbilitySlot("DR", ab.Dr, info.cdDread,    Config.ABILITIES.DREAD_COOLDOWN,    info.dreadActive == true)
         UpdateAbilitySlot("TR", ab.Tr, info.cdTerrify,  Config.ABILITIES.TERRIFY_COOLDOWN,  false)
+        if ab.Hm then
+            local hmEq = (info.hammerEquipped == true)
+            if not hmEq then
+                SetCachedText("HM_ST", ab.Hm.Status, "STOWED")
+                SetCachedColor("HM_STC", ab.Hm.Status, UITheme.COLORS.ASH)
+                if ab.Hm.Gauge then
+                    ab.Hm.Gauge:SetPercent(0.0)
+                    ab.Hm.Gauge:SetColor(UITheme.COLORS.ASH)
+                end
+                if Logger.IsValidObj(ab.Hm.BgImg) and State.LastTexts["_cbg_HM"] ~= UITheme.COLORS.DIM then
+                    State.LastTexts["_cbg_HM"] = UITheme.COLORS.DIM
+                    pcall(function() ab.Hm.BgImg:SetColorAndOpacity(UITheme.COLORS.DIM) end)
+                end
+            else
+                local cd = tonumber(info.cdHammer) or 0.0
+                local cdMax = tonumber(info.hammerCooldownMax) or (Config.HAMMER.SWING_COOLDOWN or 0.48)
+                local ready = (cd <= 0.05)
+                local frac = ready and 1.0 or (1.0 - Bridge.Clamp(cd / math.max(0.01, cdMax), 0.0, 1.0))
+                SetCachedText("HM_ST", ab.Hm.Status, ready and "ARMED" or string.format("%.1fs", cd))
+                SetCachedColor("HM_STC", ab.Hm.Status, ready and UITheme.COLORS.AMBER or UITheme.COLORS.CRIMSON_SOFT)
+                if ab.Hm.Gauge then
+                    ab.Hm.Gauge:SetPercent(frac)
+                    ab.Hm.Gauge:SetColor(ready and UITheme.COLORS.AMBER or UITheme.COLORS.CRIMSON)
+                end
+                if Logger.IsValidObj(ab.Hm.BgImg) and State.LastTexts["_cbg_HM"] ~= UITheme.COLORS.CRIMSON then
+                    State.LastTexts["_cbg_HM"] = UITheme.COLORS.CRIMSON
+                    pcall(function() ab.Hm.BgImg:SetColorAndOpacity(UITheme.COLORS.CRIMSON) end)
+                end
+            end
+        end
         if ab.FreeCam then
             SetWidgetVisible("AbilFC", ab.FreeCam, info.freeCam == true)
         end
+    end
+
+    if State.Widgets.Ambient and State.Widgets.Ambient.Crosshair then
+        SetWidgetVisible("HammerCrosshair", State.Widgets.Ambient.Crosshair, (not ended) and (info.hammerEquipped == true))
     end
 
     -- Ambient camcorder frame kept clean & glitch-free even at high Fear / close pursuit

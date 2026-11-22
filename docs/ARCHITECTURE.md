@@ -22,6 +22,7 @@ main.lua (ExecuteInGameThreadAfterFrames loop, World transition & Travel FSM)
  ├── slender_controller.lua      (ACharacter spawn, SK_Slender01 mesh/animations, 3D tentacles, collision)
  ├── camera_controller.lua       (3P over-shoulder CameraActor, spring-arm trace, FreeCam)
  ├── slender_abilities.lua       (Q Teleport, E Psychic Dread, F Terrify + Objective Interruption)
+ ├── slender_hammer.lua          (R Toggleable 3D Hammer, LMB Chaos Prop Detach / RMB Teardown Wall Breach)
  ├── human_visuals.lua           (Survivor AIController possession, ShadowCaster material restoration, PAS_HumanFlashlight)
  ├── objective_manager.lua       (Multi-map objective indexing, exploration zones, blacklist)
  ├── human_navigation.lua        (RecastNavMesh direct pathing OR House BFS + DoorTunnels + 5-ray whiskers)
@@ -61,5 +62,5 @@ main.lua (ExecuteInGameThreadAfterFrames loop, World transition & Travel FSM)
 
 ### 3.5. Hunt Escalation, Fear & Match Scoring (`human_fear_system.lua`, `slender_abilities.lua`, `game_mode_manager.lua`)
 - **Hunt Stages I–IV**: Collecting objectives escalates the hunt (`STAGE I: STALKING` → `STAGE II: HAUNTING` → `STAGE III: DESPERATION` → `STAGE IV: FINAL HOUR`), scaling passive LOS and Psychic Dread fear rates (`+7%` per stage above Stage I) and announcing transitions in the HUD.
-- **Abilities**: `Q` Teleport (LOS pop-in & collision validated), `E` Psychic Dread (fear aura + `25%` faster Terrify recharge when stalking unseen in `8–24 m`), and `F` Terrify (`+22..+32` Fear, plus `+6` bonus Fear & Objective Interruption tracking within `5 m` of uncollected objectives or during `Interacting`).
+- **Abilities**: `Q` Teleport (LOS pop-in & collision validated), `E` Psychic Dread (fear aura + `25%` faster Terrify recharge when stalking unseen in `8–24 m`), `F` Terrify (`+22..+32` Fear, plus `+6` bonus Fear & Objective Interruption tracking within `5 m` of uncollected objectives or during `Interacting`), and `R` **Toggleable 3D Demolition Hammer** (`slender_hammer.lua`: hidden by default, anchored around `SK_Slender01`'s `hand_r`, `LMB` Chaos rigid-body detachment/batting + foliage removal + modular wall cracking, `RMB` heavy slam + `340 cm` radial shockwave shattering walls/props into textured Chaos debris chunks capped at `MAX_ACTIVE_DEBRIS=90` and destroyed cleanly on `Reset()`).
 - **Hunter Score & Rank**: Finalizes end-of-match performance into Ranks `S`–`D` displayed with native `UITheme` gauges (`SANITY SHATTERED`, `OBJECTIVES DENIED`), 2-column camcorder dossier, and native `W_Button_C` post-match actions (`NEXT LEVEL`, `RESTART [F8]`, `MAIN MENU`).
