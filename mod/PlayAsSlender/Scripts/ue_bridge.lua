@@ -289,7 +289,7 @@ end
 -- =========================================================
 -- Traces & Physics Queries
 -- =========================================================
--- TraceChannel: 0 = Visibility, 1 = Camera (UE ETraceTypeQuery)
+-- A numeric trace channel uses ETraceTypeQuery. A string selects a collision profile.
 function Bridge.LineTrace(worldContext, startPos, endPos, ignoreActors, traceChannel, bTraceComplex)
     local ksl = Bridge.GetKismetSystem()
     if not Logger.IsValidObj(ksl) or not Logger.IsValidObj(worldContext) then
@@ -297,6 +297,10 @@ function Bridge.LineTrace(worldContext, startPos, endPos, ignoreActors, traceCha
     end
     local hit = {}
     local ok, didHit = pcall(function()
+        if type(traceChannel) == "string" then
+            return ksl:LineTraceSingleByProfile(worldContext, startPos, endPos, Bridge.FName(traceChannel),
+                bTraceComplex == true, ignoreActors or EMPTY_ACTORS, 0, hit, true, ZERO_COLOR, ZERO_COLOR, 0.0)
+        end
         return ksl:LineTraceSingle(
             worldContext,
             startPos,
@@ -373,6 +377,16 @@ function Bridge.GetComponentBounds(comp)
     return orig, ext, rad
 end
 
+-- EObjectTypeQuery indices for WorldStatic, WorldDynamic and PhysicsBody.
+local hammerObjectTypes = { 0, 1, 3 }
+
+-- UE4SS 4 supplies array elements as RemoteUnrealParam references.
+function Bridge.ResolveObjectParam(value)
+    if Logger.IsValidObj(value) then return value end
+    local ok, obj = pcall(function() return value:get() end)
+    if ok and Logger.IsValidObj(obj) then return obj end
+end
+
 function Bridge.SphereOverlapComponents(world, center, radius, ignoreActors)
     if not Logger.IsValidObj(world) or not center then return {} end
     local ksl = Bridge.GetKismetSystem()
@@ -383,16 +397,20 @@ function Bridge.SphereOverlapComponents(world, center, radius, ignoreActors)
             world,
             Bridge.Vec(center.X, center.Y, center.Z),
             tonumber(radius) or 150.0,
-            {},
-            nil,
+            hammerObjectTypes,
+            Bridge.GetClass("/Script/Engine.StaticMeshComponent"),
             ignoreActors or {},
             outComps
         )
     end)
-    if ok and res and type(outComps) == "table" then
-        return outComps
+    local components = {}
+    if ok and res then
+        for _, entry in ipairs(outComps) do
+            local comp = Bridge.ResolveObjectParam(entry)
+            if comp then components[#components + 1] = comp end
+        end
     end
-    return {}
+    return components
 end
 
 function Bridge.HasLineOfSight(worldContext, fromPos, toPos, ignoreActors, targetActor)
@@ -420,10 +438,10 @@ function Bridge.IsRayBlockedDual(worldContext, startPos, endPos, ignoreActors)
     return false, nil
 end
 
-function Bridge.GroundTrace(worldContext, x, y, startZ, endZ, ignoreActors)
+function Bridge.GroundTrace(worldContext, x, y, startZ, endZ, ignoreActors, profile)
     local s = { X = x, Y = y, Z = startZ }
     local e = { X = x, Y = y, Z = endZ }
-    local hit, info = Bridge.LineTrace(worldContext, s, e, ignoreActors, 0, false)
+    local hit, info = Bridge.LineTrace(worldContext, s, e, ignoreActors, profile or 0, false)
     if hit and info.ImpactPoint then
         return true, info.ImpactPoint.Z, info.ImpactNormal, info.Actor
     end

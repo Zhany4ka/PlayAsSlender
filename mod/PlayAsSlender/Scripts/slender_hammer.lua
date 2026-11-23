@@ -8,6 +8,7 @@
 local Config = require("config")
 local Logger = require("logger")
 local Bridge = require("ue_bridge")
+local WallBreach = require("hammer_wall_breach")
 
 local HammerMgr = {}
 
@@ -34,8 +35,8 @@ local State = {
     BreachFrames      = {},    -- jagged wall opening framing actors { actor }
     DelayedSounds     = {},    -- staggered cascade audio events { at, loc, path, fb, vol, pitch }
     SimProps          = {},    -- compAddr -> { comp }
-    Cracked           = {},    -- compAddr -> { hp, comp, scars = {} }
-    Scars             = {},    -- crack/crater overlay actors
+    Cracked           = {},    -- compAddr -> { hp, comp }
+    Scars             = {},    -- crack/crater overlays { actor, surface }
     DestroyedCount    = 0,
     DetachedCount     = 0,
     ChunksSpawned     = 0,
@@ -81,6 +82,7 @@ local function DestroyArrayActors(arr)
 end
 
 function HammerMgr.Reset()
+    WallBreach.Reset()
     DestroyArrayActors(State.Parts)
     DestroyArrayActors(State.DebrisPool)
     DestroyArrayActors(State.SplinterPool)
@@ -386,7 +388,8 @@ local function ClassifyMaterial(hitComp, hitActor)
 
     local blob = compName .. " " .. actName .. " " .. meshName .. " " .. matName
     local kind = "STONE"
-    if string.find(blob, "glass") or string.find(blob, "window") or string.find(blob, "mirror") or string.find(blob, "pane") then
+    if string.find(blob, "glass") or string.find(blob, "window") or string.find(blob, "mirror")
+        or string.find(blob, "%f[%a]pane%f[%A]") then
         kind = "GLASS"
     elseif string.find(blob, "bark") or string.find(blob, "tree") or string.find(blob, "conifer") or string.find(blob, "pine") or string.find(blob, "foliage") or string.find(blob, "bush") then
         kind = "TREE"
@@ -488,19 +491,81 @@ end
 local function EnableChaosPhysics(comp, massKg)
     if not Logger.IsValidObj(comp) then return false end
     pcall(function() comp:SetMobility(2) end)
-    pcall(function() comp:SetCollisionProfileName(Bridge.FName("PhysicsActor"), true) end)
     pcall(function() comp:SetCollisionEnabled(3) end)
-    -- Overlap Pawns (ECC_Pawn=3, ECR_Overlap=1) so rubble never blocks players
-    pcall(function() comp:SetCollisionResponseToChannel(3, 1) end)
-    pcall(function() comp:SetEnableGravity(true) end)
     pcall(function() comp:SetSimulatePhysics(true) end)
-    pcall(function() comp:WakeAllRigidBodies() end)
-    if massKg and massKg > 0 then
-        pcall(function() comp:SetMassOverrideInKg(Bridge.FName("None"), massKg, true) end)
-    end
     local sim = false
     pcall(function() sim = (comp:IsSimulatingPhysics(Bridge.FName("None")) == true) end)
+    if sim then
+        pcall(function() comp:SetCollisionProfileName(Bridge.FName("PhysicsActor"), true) end)
+        pcall(function() comp:SetCollisionEnabled(3) end)
+        -- Players and camera pass through loose rubble, while hammer visibility traces can hit it again.
+        pcall(function() comp:SetCollisionResponseToChannel(2, 1) end) -- ECC_Pawn, Overlap
+        pcall(function() comp:SetCollisionResponseToChannel(3, 2) end) -- ECC_Visibility, Block
+        pcall(function() comp:SetCollisionResponseToChannel(4, 1) end) -- ECC_Camera, Overlap
+        pcall(function() comp:SetEnableGravity(true) end)
+        pcall(function() comp:WakeAllRigidBodies() end)
+        if massKg and massKg > 0 then
+            pcall(function() comp:SetMassOverrideInKg(Bridge.FName("None"), massKg, true) end)
+        end
+    end
     return sim
+end
+
+local function DisableSiblingCollisionBlockers(comp)
+    if not Logger.IsValidObj(comp) then return end
+    local owner = nil
+    pcall(function() owner = comp:GetOwner() end)
+    if not Logger.IsValidObj(owner) then return end
+    local compOrig = Bridge.GetComponentBounds(comp)
+    local ownerName = string.lower(Logger.SafeName(owner))
+    local isDoorContainer = ownerName:find("door", 1, true) or ownerName:find("gate", 1, true)
+        or ownerName:find("cabinet", 1, true) or ownerName:find("cupboard", 1, true)
+        or ownerName:find("locker", 1, true) or ownerName:find("closet", 1, true)
+        or ownerName:find("chest", 1, true) or ownerName:find("window", 1, true)
+    local primClass = Bridge.GetClass("/Script/Engine.PrimitiveComponent")
+    if not primClass then return end
+    local compAddr = Bridge.GetObjAddr(comp)
+    local function HandlePart(p)
+        if not Logger.IsValidObj(p) or Bridge.GetObjAddr(p) == compAddr then return end
+        local hidden, hasMesh = false, false
+        pcall(function()
+            hidden = (p.bHiddenInGame == true) or (p.bVisible == false)
+            hasMesh = Logger.IsValidObj(p.StaticMesh)
+        end)
+        if not hidden and hasMesh then return end
+        local pname = string.lower(Logger.SafeName(p))
+        if not (pname:find("collision", 1, true) or pname:find("blocker", 1, true)
+            or pname:find("nav", 1, true) or ((not hasMesh) and pname:find("box", 1, true))) then
+            return
+        end
+        if (not isDoorContainer) and compOrig then
+            local po = Bridge.GetComponentBounds(p)
+            if po and Bridge.Dist(po, compOrig) > 220.0 then return end
+        end
+        pcall(function() p:SetCollisionEnabled(0) end)
+        pcall(function() p:SetCollisionResponseToAllChannels(0) end)
+    end
+    pcall(function()
+        local parts = owner:K2_GetComponentsByClass(primClass)
+        if type(parts) == "table" then
+            for _, entry in ipairs(parts) do HandlePart(Bridge.ResolveObjectParam(entry)) end
+        elseif parts then
+            parts:ForEach(function(_, entry) HandlePart(Bridge.ResolveObjectParam(entry)) end)
+        end
+    end)
+end
+
+local function TryDetachProp(comp, massKg)
+    local mobility, collision
+    pcall(function() mobility = comp.Mobility end)
+    pcall(function() collision = comp:GetCollisionEnabled() end)
+    if EnableChaosPhysics(comp, massKg) then
+        DisableSiblingCollisionBlockers(comp)
+        return true
+    end
+    if collision then pcall(function() comp:SetCollisionEnabled(collision) end) end
+    if mobility then pcall(function() comp:SetMobility(mobility) end) end
+    return false
 end
 
 local function ApplyChaosImpulse(comp, impulseVec, hitLoc, angSpinDeg)
@@ -531,10 +596,12 @@ local function DisableComponentAndActor(comp)
     pcall(function() comp:SetCollisionEnabled(0) end)
     pcall(function() comp:SetCollisionResponseToAllChannels(0) end)
     pcall(function() comp:SetHiddenInGame(true, false) end)
-    pcall(function() comp:SetVisibility(false, true) end)
+    pcall(function() comp:SetVisibility(false, false) end)
+    DisableSiblingCollisionBlockers(comp)
 end
 
 local function EvictOldEntry(pool, maxCap)
+    maxCap = math.max(1, math.floor(maxCap))
     while #pool >= maxCap do
         local old = table.remove(pool, 1)
         if old then
@@ -549,12 +616,6 @@ local function SpawnChaosCube(pos, rot, scaleVec, matAsset, massKg, impulseVec, 
     local cubeMesh = Bridge.LoadOrFindAsset(PATHS.MESH_CUBE)
     if not Logger.IsValidObj(world) or not Logger.IsValidObj(cubeMesh) or not pos then return nil end
 
-    if toSplinterPool then
-        EvictOldEntry(State.SplinterPool, Config.HAMMER.MAX_ACTIVE_SPLINTERS or 55)
-    else
-        EvictOldEntry(State.DebrisPool, Config.HAMMER.MAX_ACTIVE_DEBRIS or 160)
-    end
-
     local actor = Bridge.SpawnActorDeferred(world, "/Script/Engine.StaticMeshActor", pos, rot and rot.Yaw or 0.0)
     if not Logger.IsValidObj(actor) then return nil end
 
@@ -565,8 +626,12 @@ local function SpawnChaosCube(pos, rot, scaleVec, matAsset, massKg, impulseVec, 
     end
 
     pcall(function() comp:SetMobility(2) end)
-    pcall(function() comp:SetStaticMesh(cubeMesh) end)
-    pcall(function()
+    local meshOK, assigned = pcall(function() return comp:SetStaticMesh(cubeMesh) end)
+    if not meshOK or assigned == false then
+        SafeDestroyActor(actor)
+        return nil
+    end
+    local transformOK = pcall(function()
         comp:K2_SetRelativeRotation(Bridge.Rot(rot and rot.Pitch or 0.0, rot and rot.Yaw or 0.0, rot and rot.Roll or 0.0), false, {}, true)
         if comp.SetRelativeScale3D then
             comp:SetRelativeScale3D(Bridge.Vec(scaleVec.X, scaleVec.Y, scaleVec.Z))
@@ -577,15 +642,20 @@ local function SpawnChaosCube(pos, rot, scaleVec, matAsset, massKg, impulseVec, 
         pcall(function() comp:SetMaterial(0, matAsset) end)
     end
 
-    EnableChaosPhysics(comp, massKg or 22.0)
+    if not transformOK or not EnableChaosPhysics(comp, massKg or 22.0) then
+        SafeDestroyActor(actor)
+        return nil
+    end
     if impulseVec then
         ApplyChaosImpulse(comp, impulseVec, nil, spinDeg or 280.0)
     end
 
     if toSplinterPool then
+        EvictOldEntry(State.SplinterPool, Config.HAMMER.MAX_ACTIVE_SPLINTERS or 55)
         table.insert(State.SplinterPool, { actor = actor, comp = comp, expiresAt = os.clock() + 4.5 })
     else
-        table.insert(State.DebrisPool, { actor = actor, comp = comp, spawnedAt = os.clock() })
+        EvictOldEntry(State.DebrisPool, Config.HAMMER.MAX_ACTIVE_DEBRIS or 160)
+        table.insert(State.DebrisPool, { actor = actor, comp = comp, address = Bridge.GetObjAddr(comp), spawnedAt = os.clock() })
         State.ChunksSpawned = State.ChunksSpawned + 1
     end
     return actor
@@ -623,7 +693,8 @@ local function SpawnSplinters(origin, normal, swingDir, kind, matAsset, count, s
             Y = (dir.Y * 0.50 + nrm.Y * 0.50 + (math.random() - 0.5) * 0.90) * speed,
             Z = (dir.Z * 0.25 + nrm.Z * 0.30 + 0.45 + math.random() * 0.45) * speed,
         }
-        local useMat = (i % 3 == 0 and darkMat) or matAsset
+        local isWood = kind == "WOOD" or kind == "TREE"
+        local useMat = (isWood and i % 3 == 0 and darkMat) or matAsset
         if SpawnChaosCube(pos, rot, sc, useMat, 5.0, iv, 520.0, true) then
             n = n + 1
         end
@@ -645,7 +716,7 @@ local function SampleSafeGroundZ(world, x, y, topRefZ, ignoreActors)
     return nil
 end
 
-local function FractureBoundsToChaosGrid(orig, ext, matFront, matBack, kind, impactPoint, swingDir, isHeavy, isWall, thinAxis, ignoreActors)
+local function FractureBoundsToChaosGrid(orig, ext, matFront, matBack, kind, impactPoint, swingDir, isHeavy, isWall, thinAxis, ignoreActors, sourceActor)
     if not orig or not ext then return 0 end
     local world = State.World
     if not Logger.IsValidObj(world) then return 0 end
@@ -657,7 +728,14 @@ local function FractureBoundsToChaosGrid(orig, ext, matFront, matBack, kind, imp
 
     local centerImp = isHeavy and (Config.HAMMER.FRACTURE_CENTER_IMPULSE or 480.0) or 340.0
     local edgeImp   = Config.HAMMER.FRACTURE_EDGE_IMPULSE or 190.0
-    local groundZ   = SampleSafeGroundZ(world, imp.X, imp.Y, math.min(orig.Z + ext.Z, imp.Z + 80.0), ignoreActors)
+    -- The source remains intact until valid replacement bodies exist.
+    local groundIgnore = ignoreActors
+    if Logger.IsValidObj(sourceActor) then
+        groundIgnore = {}
+        for _, actor in ipairs(ignoreActors or {}) do table.insert(groundIgnore, actor) end
+        table.insert(groundIgnore, sourceActor)
+    end
+    local groundZ   = SampleSafeGroundZ(world, imp.X, imp.Y, math.min(orig.Z + ext.Z, imp.Z + 80.0), groundIgnore)
         or (orig.Z - ext.Z)
 
     if isWall and thinAxis then
@@ -719,7 +797,7 @@ local function FractureBoundsToChaosGrid(orig, ext, matFront, matBack, kind, imp
         end
 
         -- 4 Internal Snapped Timber Studs spilling across the rubble pile
-        for sIdx = 1, 4 do
+        for sIdx = 1, (kind == "WOOD" and 4 or 0) do
             local wPos = wCenter + (sIdx - 2.5) * (breachW * 0.21)
             local zPos = math.max(groundZ + 48.0, zCenter + (math.random() - 0.5) * 60.0)
             local pos = (thinAxis == "X")
@@ -884,10 +962,31 @@ end
 -- =========================================================
 -- Double-Layer Wall Sandwich & Protection Resolvers
 -- =========================================================
-local function IsProtectedTarget(hitComp, hitActor, hitNormal, ext, origin)
+local function IsProtectedTarget(hitComp, hitActor, hitNormal, ext, origin, instanced)
     local compName = string.lower(Logger.SafeName(hitComp))
     local actName  = string.lower(Logger.SafeName(hitActor))
-    local blob     = compName .. " " .. actName
+    local meshName = ""
+    local hidden = false
+    pcall(function()
+        hidden = hitComp.bHiddenInGame == true or hitComp.bVisible == false or (hitActor and hitActor.bHidden == true)
+        meshName = string.lower(Logger.SafeName(hitComp.StaticMesh))
+    end)
+    if hidden then return true, "hidden_component" end
+    local actorClass = ""
+    if Logger.IsValidObj(hitActor) then
+        pcall(function() actorClass = string.lower(Logger.SafeName(hitActor:GetClass())) end)
+    end
+    local actorType = actName .. " " .. actorClass
+    for _, role in ipairs({ "bp_collect_", "bp_evidence", "bp_interact_answeringmachine", "bp_interact_radiomusic",
+            "bp_interact_playablepiano", "bp_interact_cordlessphone", "bp_backgate_level1" }) do
+        if actorType:find(role, 1, true) then return true, "story_object" end
+    end
+    -- These placed doors are opened by the prologue script at specific stages.
+    local doorName = actName:gsub("_%d+$", ""):gsub("_c$", "")
+    if doorName == "bp_door_main" or doorName == "bp_door_main2" or doorName == "bp_door_room14_locked" then
+        return true, "story_door"
+    end
+    local blob = compName .. " " .. actName .. " " .. meshName
 
     local forbidden = {
         "landscape", "heightfield", "terrain", "sky", "fog", "cloud", "water", "ocean", "river",
@@ -903,7 +1002,7 @@ local function IsProtectedTarget(hitComp, hitActor, hitNormal, ext, origin)
 
     if ext and hitNormal then
         local isFlatUp = math.abs(hitNormal.Z or 0) > 0.72
-        if isFlatUp and ext.X > 180.0 and ext.Y > 180.0 and ext.Z < 60.0 then
+        if not instanced and isFlatUp and ext.X > 180.0 and ext.Y > 180.0 and ext.Z < 60.0 then
             return true, "protected_floor"
         end
         if string.find(blob, "floor", 1, true) or string.find(blob, "road", 1, true) or string.find(blob, "sidewalk", 1, true) then
@@ -927,187 +1026,214 @@ local function DetectWallThinAxis(ext, impactNormal)
     return "X"
 end
 
+local function IsInstancedComponent(comp)
+    local class = Bridge.GetClass("/Script/Engine.InstancedStaticMeshComponent")
+    if class then
+        local ok, instanced = pcall(function() return comp:IsA(class) end)
+        if ok then return instanced end
+    end
+    local className = Logger.SafeFullName(comp):match("^%S+") or ""
+    return className:find("InstancedStaticMesh", 1, true) ~= nil
+end
+
+local function IsVisibleMesh(comp, owner)
+    if not Logger.IsValidObj(owner) or IsInstancedComponent(comp) or WallBreach.IsRemnant(comp) then return false end
+    local ok, visible = pcall(function()
+        return comp.bVisible ~= false and comp.bHiddenInGame ~= true and owner.bHidden ~= true
+            and Logger.IsValidObj(comp.StaticMesh)
+    end)
+    return ok and visible
+end
+
 local function FindCoplanarWallGroup(hitComp, hitActor, orig, ext, impactPoint, impactNormal, ignore)
     local world = State.World
-    if not Logger.IsValidObj(world) or not Logger.IsValidObj(hitComp) or not orig or not ext then
+    if not Logger.IsValidObj(world) or not orig or not ext then return {}, {}, nil, nil end
+
+    local thinAxis = DetectWallThinAxis(ext, impactNormal)
+    local wideAxis = thinAxis == "X" and "Y" or "X"
+    local widthExt, depthExt = ext[wideAxis], ext[thinAxis]
+    local isCompoundShell = (math.max(ext.X, ext.Y, ext.Z) > (Config.HAMMER.GIANT_MESH_MIN_EXT or 720.0))
+    if (not isCompoundShell) and (ext.Z < 55 or depthExt > math.min(68, widthExt * 0.45)) then
         return {}, {}, nil, nil
     end
 
-    local thinAxis   = DetectWallThinAxis(ext, impactNormal)
-    local widthExt   = (thinAxis == "X") and ext.Y or ext.X
-    local thinTol    = Config.HAMMER.WALL_PAIR_THIN_TOL_CM or 82.0
-    local wideTol    = math.max(Config.HAMMER.WALL_PAIR_WIDE_TOL_CM or 155.0, widthExt * 0.75)
+    local searchOrig = isCompoundShell and (impactPoint or orig) or orig
+    local searchWideExt = isCompoundShell and 130.0 or widthExt
+    local searchDepthExt = isCompoundShell and 24.0 or depthExt
+    local searchZExt = isCompoundShell and math.min(ext.Z, 150.0) or ext.Z
 
-    local hitAddr    = Bridge.GetObjAddr(hitComp)
-    local seen       = {}
-    local candidates = {}
-
-    local function AddComp(c)
-        if not Logger.IsValidObj(c) then return end
+    local pairedWalls, attachedTrim, backMat = {}, {}, nil
+    local seen = { [Bridge.GetObjAddr(hitComp)] = true }
+    local function Consider(c)
         local addr = Bridge.GetObjAddr(c)
         if addr == 0 or seen[addr] then return end
         seen[addr] = true
-        if addr ~= hitAddr then
-            table.insert(candidates, c)
+        local owner = c:GetOwner()
+        if not IsVisibleMesh(c, owner) or c:IsSimulatingPhysics(Bridge.FName("None")) then return end
+        local co, ce = Bridge.GetComponentBounds(c)
+        if not co or not ce or IsProtectedTarget(c, owner, { Z = 1 }, ce, co) then return end
+        local dThin, dWide, dZ = math.abs(co[thinAxis] - searchOrig[thinAxis]), math.abs(co[wideAxis] - searchOrig[wideAxis]), math.abs(co.Z - searchOrig.Z)
+        local depthTolerance = math.max(Config.HAMMER.WALL_PAIR_THIN_TOL_CM or 82, searchDepthExt + ce[thinAxis] + 48)
+        if dThin > depthTolerance then return end
+
+        local overlapsImpactWide, overlapsImpactZ
+        if impactPoint then
+            overlapsImpactWide = math.abs(impactPoint[wideAxis] - co[wideAxis]) <= (ce[wideAxis] + 28.0)
+            overlapsImpactZ    = math.abs(impactPoint.Z - co.Z) <= (ce.Z + 28.0)
+        else
+            overlapsImpactWide = dWide <= searchWideExt + 35.0
+            overlapsImpactZ    = dZ <= searchZExt + 35.0
         end
+
+        -- Classify the component's mesh. Many unrelated pieces share the same house actor and plaster material.
+        local name = string.lower(Logger.SafeName(c) .. " " .. Logger.SafeName(c.StaticMesh))
+        local isTrim = name:find("trim", 1, true) or name:find("baseboard", 1, true) or name:find("peel", 1, true)
+            or name:find("decal", 1, true) or name:find("switch", 1, true) or name:find("thermostat", 1, true)
+            or name:find("painting", 1, true) or name:find("molding", 1, true) or name:find("outlet", 1, true)
+        if isTrim then
+            if math.max(ce.X, ce.Y, ce.Z) <= 220 and dWide <= (searchWideExt + ce[wideAxis] + 35) and dZ <= (searchZExt + ce.Z + 35) then
+                if (not isCompoundShell) or Bridge.Dist(co, searchOrig) <= 320.0 then
+                    table.insert(attachedTrim, { comp = c, owner = owner, blob = name, orig = co, ext = ce })
+                end
+            end
+            return
+        end
+        local wallName = name:find("wall", 1, true) or name:find("siding", 1, true)
+            or name:find("plaster", 1, true) or name:find("patch", 1, true)
+            or name:find("drywall", 1, true) or name:find("panel", 1, true)
+            or name:find("brick", 1, true) or name:find("partition", 1, true)
+            or name:find("cabin", 1, true) or name:find("barn", 1, true)
+            or name:find("shed", 1, true) or name:find("corrugated", 1, true)
+        if not wallName or ce.Z < 55 or ce[thinAxis] > math.min(68, math.max(ce[wideAxis] * 0.48, 32)) then return end
+        -- Twin back face must cover the struck impact region without engulfing neighboring upper-floor or mega structures.
+        if (not overlapsImpactWide) or (not overlapsImpactZ) then return end
+        if ce[wideAxis] > math.max(searchWideExt * 1.65 + 65.0, 520.0) or ce.Z > math.max(searchZExt * 1.48 + 65.0, 420.0) then return end
+        local _, mat = ClassifyMaterial(c, owner)
+        table.insert(pairedWalls, { comp = c, owner = owner, name = Logger.SafeName(owner), mat = mat, orig = co, ext = ce })
+        if not backMat and Logger.IsValidObj(mat) then backMat = mat end
     end
 
-    -- Source 1: SphereOverlapComponents around wall midpoint
-    local ovComps = Bridge.SphereOverlapComponents(world, orig, math.max(widthExt + 100.0, 320.0), ignore)
-    for _, c in ipairs(ovComps) do AddComp(c) end
+    local radius = math.sqrt(searchWideExt * searchWideExt + searchZExt * searchZExt) + searchDepthExt + 55
+    for _, c in ipairs(Bridge.SphereOverlapComponents(world, searchOrig, radius, ignore)) do Consider(c) end
 
-    -- Source 2: Piercing dual-direction trace right through wall thickness (ignores hitActor so twin side IS caught!)
+    -- Render-only skins can have NoCollision. Query their owning blueprint without scanning every level component.
+    if Logger.IsValidObj(hitActor) then
+        pcall(function()
+            local parts = hitActor:K2_GetComponentsByClass(Bridge.GetClass("/Script/Engine.StaticMeshComponent"))
+            if type(parts) == "table" then
+                for _, entry in ipairs(parts) do Consider(Bridge.ResolveObjectParam(entry)) end
+            elseif parts then
+                parts:ForEach(function(_, entry) Consider(Bridge.ResolveObjectParam(entry)) end)
+            end
+        end)
+    end
     if impactPoint and impactNormal then
-        local pierceIgnore = {}
-        for _, ig in ipairs(ignore or {}) do table.insert(pierceIgnore, ig) end
-        if Logger.IsValidObj(hitActor) then table.insert(pierceIgnore, hitActor) end
-        local pStart = {
-            X = impactPoint.X + impactNormal.X * 12.0,
-            Y = impactPoint.Y + impactNormal.Y * 12.0,
-            Z = impactPoint.Z + impactNormal.Z * 12.0,
+        local excluded = {}
+        for _, actor in ipairs(ignore or {}) do table.insert(excluded, actor) end
+        if Logger.IsValidObj(hitActor) then table.insert(excluded, hitActor) end
+        local maxPierce = math.max(92.0, searchDepthExt * 2.0 + 58.0)
+        local startPos = {
+            X = impactPoint.X + impactNormal.X * 10.0,
+            Y = impactPoint.Y + impactNormal.Y * 10.0,
+            Z = impactPoint.Z + impactNormal.Z * 10.0,
         }
-        local pEnd = {
-            X = impactPoint.X - impactNormal.X * 105.0,
-            Y = impactPoint.Y - impactNormal.Y * 105.0,
-            Z = impactPoint.Z - impactNormal.Z * 105.0,
+        local endPos = {
+            X = impactPoint.X - impactNormal.X * maxPierce,
+            Y = impactPoint.Y - impactNormal.Y * maxPierce,
+            Z = impactPoint.Z - impactNormal.Z * maxPierce,
         }
-        local pHit, pInfo = Bridge.LineTrace(world, pStart, pEnd, pierceIgnore, 0, false)
-        if pHit and pInfo and Logger.IsValidObj(pInfo.Component) then
-            AddComp(pInfo.Component)
-        end
-    end
-
-    -- Source 3: Nearby StaticMeshComponents (< 360cm) so single-sided interior/trim panels never slip through
-    local searchRad = math.max(360.0, widthExt + 140.0)
-    for _, c in ipairs(FindAllOf("StaticMeshComponent") or {}) do
-        if Logger.IsValidObj(c) then
-            local addr = Bridge.GetObjAddr(c)
-            if addr ~= 0 and not seen[addr] and addr ~= hitAddr then
-                local colEn = -1
-                pcall(function() colEn = tonumber(c:GetCollisionEnabled()) or -1 end)
-                if colEn ~= 0 then
-                    local co = Bridge.GetComponentBounds(c)
-                    if co and Bridge.Dist(co, orig) <= searchRad then
-                        AddComp(c)
-                    end
-                end
+        for _ = 1, 3 do
+            local hit, info = Bridge.LineTrace(world, startPos, endPos, excluded, 0, false)
+            if not hit or not info or not Logger.IsValidObj(info.Component) then break end
+            Consider(info.Component)
+            if Logger.IsValidObj(info.Actor) then
+                table.insert(excluded, info.Actor)
+            else
+                break
+            end
+            if info.ImpactPoint then
+                startPos = {
+                    X = info.ImpactPoint.X - impactNormal.X * 4.0,
+                    Y = info.ImpactPoint.Y - impactNormal.Y * 4.0,
+                    Z = info.ImpactPoint.Z - impactNormal.Z * 4.0,
+                }
             end
         end
     end
-
-    local pairedWalls  = {}
-    local attachedTrim = {}
-    local backMat      = nil
-
-    for _, c in ipairs(candidates) do
-        local cSim = false
-        pcall(function() cSim = (c:IsSimulatingPhysics(Bridge.FName("None")) == true) end)
-        if not cSim then
-            local cOwner = nil
-            pcall(function() cOwner = c:GetOwner() end)
-            local co, ce = Bridge.GetComponentBounds(c)
-            if co and ce then
-                local cThin  = (thinAxis == "X") and co.X or co.Y
-                local hThin  = (thinAxis == "X") and orig.X or orig.Y
-                local cWide  = (thinAxis == "X") and co.Y or co.X
-                local hWide  = (thinAxis == "X") and orig.Y or orig.X
-                local dThin  = math.abs(cThin - hThin)
-                local dWide  = math.abs(cWide - hWide)
-                local dZ     = math.abs(co.Z - orig.Z)
-
-                local _, cMat, cBlob = ClassifyMaterial(c, cOwner)
-                local cProt = IsProtectedTarget(c, cOwner, { X = 0, Y = 0, Z = 0 }, ce, co)
-                local cMaxE = math.max(ce.X, ce.Y, ce.Z)
-
-                local cIsWallName = string.find(cBlob, "wall", 1, true) or string.find(cBlob, "siding", 1, true)
-                    or string.find(cBlob, "drywall", 1, true) or string.find(cBlob, "brick", 1, true)
-                    or string.find(cBlob, "concrete", 1, true) or string.find(cBlob, "cabin", 1, true)
-                    or string.find(cBlob, "shed", 1, true) or string.find(cBlob, "patch", 1, true)
-                    or string.find(cBlob, "plaster", 1, true)
-                local isDoorOrWin = (not cIsWallName) and (string.find(cBlob, "door", 1, true) or string.find(cBlob, "window", 1, true))
-                local isAttachable = string.find(cBlob, "trim", 1, true) or string.find(cBlob, "peel", 1, true)
-                    or string.find(cBlob, "switch", 1, true) or string.find(cBlob, "thermostat", 1, true)
-                    or string.find(cBlob, "frame", 1, true) or string.find(cBlob, "painting", 1, true)
-                    or string.find(cBlob, "plank", 1, true) or string.find(cBlob, "light", 1, true)
-                    or string.find(cBlob, "board", 1, true)
-
-                if (not cProt) and isAttachable and cMaxE <= 165.0 and (not string.find(cBlob, "door", 1, true)) then
-                    if dThin <= 65.0 and dWide <= (widthExt + 32.0) and dZ <= (ext.Z + 45.0) then
-                        table.insert(attachedTrim, { comp = c, owner = cOwner, blob = cBlob, orig = co, ext = ce })
-                    end
-                elseif (not cProt) and (not isDoorOrWin) and ce.Z >= 55.0 then
-                    local samePlaneAxis = (thinAxis == "X" and ce.X < ce.Y * 0.65)
-                        or (thinAxis == "Y" and ce.Y < ce.X * 0.65)
-                        or (string.find(cBlob, "patch", 1, true) and ce.Z >= 120.0 and dWide >= (widthExt * 0.72) and dWide <= (widthExt + 25.0))
-
-                    if cIsWallName and samePlaneAxis and dThin <= thinTol and dWide <= wideTol and dZ <= 170.0 then
-                        table.insert(pairedWalls, { comp = c, owner = cOwner, mat = cMat, name = Logger.SafeName(cOwner) })
-                        if (not Logger.IsValidObj(backMat)) and Logger.IsValidObj(cMat) then
-                            backMat = cMat
-                        end
-                    end
-                end
-            end
-        end
-    end
-
     return pairedWalls, attachedTrim, thinAxis, backMat
 end
 
 local function ApplyRadialShockwave(origin, radius, strength, swingDir, ignoreActors)
-    if not Logger.IsValidObj(State.World) or not origin then return 0 end
-    local comps = Bridge.SphereOverlapComponents(State.World, origin, radius, ignoreActors)
-    local pushed = 0
-    local maxExtSmall = Config.HAMMER.SMALL_PROP_MAX_EXT or 145.0
+    if not Logger.IsValidObj(State.World) or not origin or radius <= 0 then return 0 end
+    local props = Bridge.SphereOverlapComponents(State.World, origin, radius, ignoreActors)
+    local seen, pushed = {}, 0
+    local maxExtSmall = (Config.HAMMER.SMALL_PROP_MAX_EXT or 145) * 0.85
+    local staticActorClass = Bridge.GetClass("/Script/Engine.StaticMeshActor")
 
-    for _, c in ipairs(comps) do
-        if Logger.IsValidObj(c) then
-            local alreadySim = false
-            pcall(function() alreadySim = (c:IsSimulatingPhysics(Bridge.FName("None")) == true) end)
-
-            if not alreadySim then
-                local _, ext = Bridge.GetComponentBounds(c)
-                local cname = string.lower(Logger.SafeName(c))
-                local isProt = string.find(cname, "landscape") or string.find(cname, "floor") or string.find(cname, "ground")
-                    or string.find(cname, "pickup") or string.find(cname, "trigger") or string.find(cname, "collision")
-                if ext and not isProt then
-                    local maxE = math.max(ext.X, ext.Y, ext.Z)
-                    if maxE > 4.0 and maxE <= maxExtSmall * 0.85 then
-                        local ok = EnableChaosPhysics(c, 22.0)
-                        if ok then
-                            alreadySim = true
-                            State.DetachedCount = State.DetachedCount + 1
-                            local cAddr = Bridge.GetObjAddr(c)
-                            if cAddr ~= 0 then State.SimProps[cAddr] = { comp = c } end
-                        end
-                    end
+    local function Push(c)
+        local addr = Bridge.GetObjAddr(c)
+        if addr == 0 or seen[addr] then return end
+        seen[addr] = true
+        local owner = c:GetOwner()
+        if not IsVisibleMesh(c, owner) or c:GetCollisionEnabled() == 0 then return end
+        local center, ext = Bridge.GetComponentBounds(c)
+        if not center or not ext or IsProtectedTarget(c, owner, { Z = 1 }, ext, center) then return end
+        local distance = Bridge.Dist(center, origin)
+        if distance >= radius then return end
+        if not c:IsSimulatingPhysics(Bridge.FName("None")) then
+            local maxExtent = math.max(ext.X, ext.Y, ext.Z)
+            if maxExtent <= 4 or maxExtent > maxExtSmall or not staticActorClass or not owner:IsA(staticActorClass) then return end
+            local name = string.lower(Logger.SafeName(c) .. " " .. Logger.SafeName(c.StaticMesh))
+            if name:find("wall", 1, true) or name:find("door", 1, true) or name:find("frame", 1, true)
+                or name:find("floor", 1, true) or name:find("ground", 1, true) or name:find("roof", 1, true)
+                or name:find("beam", 1, true) or name:find("post", 1, true) or name:find("trim", 1, true)
+                or name:find("stair", 1, true) or name:find("collision", 1, true) then return end
+            -- Do not pull furniture through an intact intervening wall.
+            if distance > 12 then
+                local traceStart = {}
+                for _, axis in ipairs({ "X", "Y", "Z" }) do
+                    traceStart[axis] = origin[axis] + (center[axis] - origin[axis]) * (6 / distance)
                 end
+                local hit, info = Bridge.LineTrace(State.World, traceStart, center, ignoreActors, 0, false)
+                if hit and (not info or Bridge.GetObjAddr(info.Component) ~= addr) then return end
             end
-
-            if alreadySim then
-                local orig = Bridge.GetComponentBounds(c)
-                local dx = orig and (orig.X - origin.X) or swingDir.X
-                local dy = orig and (orig.Y - origin.Y) or swingDir.Y
-                local dz = orig and (orig.Z - origin.Z) or 0.0
-                local dLen = math.sqrt(dx * dx + dy * dy + dz * dz)
-                local rxN = (dLen > 1.0) and (dx / dLen) or swingDir.X
-                local ryN = (dLen > 1.0) and (dy / dLen) or swingDir.Y
-                local rzN = (dLen > 1.0) and (dz / dLen) or 0.2
-                local blastVec = {
-                    X = (rxN * 0.6 + swingDir.X * 0.4) * strength,
-                    Y = (ryN * 0.6 + swingDir.Y * 0.4) * strength,
-                    Z = (rzN * 0.25 + 0.42) * strength,
-                }
-                pcall(function() c:AddRadialImpulse(Bridge.Vec(origin.X, origin.Y, origin.Z), radius, strength, 1, true) end)
-                ApplyChaosImpulse(c, blastVec, nil, 240.0)
-                pushed = pushed + 1
-            end
+            if not TryDetachProp(c, 22) then return end
+            State.SimProps[addr] = { comp = c }
+            State.DetachedCount = State.DetachedCount + 1
         end
+        local remaining = 1 - distance / radius
+        local speed = strength * remaining
+        local inv = 1 / math.max(distance, 1)
+        local impulse = {
+            X = ((center.X - origin.X) * inv * 0.65 + swingDir.X * 0.35) * speed,
+            Y = ((center.Y - origin.Y) * inv * 0.65 + swingDir.Y * 0.35) * speed,
+            Z = ((center.Z - origin.Z) * inv * 0.25 + 0.42) * speed,
+        }
+        ApplyChaosImpulse(c, impulse, nil, 240 * remaining)
+        pushed = pushed + 1
     end
+
+    for _, c in ipairs(props) do Push(c) end
     return pushed
 end
 
-local function SpawnStarburstCracks(hitPoint, hitNormal)
+local function ClearSurfaceScars(address)
+    if not address or address == 0 then return end
+    for i = #State.Scars, 1, -1 do
+        local scar = State.Scars[i]
+        if scar.surface == address then
+            SafeDestroyActor(scar.actor)
+            table.remove(State.Scars, i)
+        end
+    end
+end
+
+local function TrackScar(actor, surface)
+    EvictOldEntry(State.Scars, Config.HAMMER.MAX_ACTIVE_SCARS or 64)
+    table.insert(State.Scars, { actor = actor, surface = surface })
+end
+
+local function SpawnStarburstCracks(hitPoint, hitNormal, surface)
     local world = State.World
     local cubeMesh = Bridge.LoadOrFindAsset(PATHS.MESH_CUBE)
     local darkMat  = FirstValidAsset({ PATHS.MAT_WOOD_DARK, PATHS.MAT_EXT_STONE, PATHS.MAT_METAL_DULL })
@@ -1137,7 +1263,7 @@ local function SpawnStarburstCracks(hitPoint, hitNormal)
                     if comp.SetRelativeScale3D then comp:SetRelativeScale3D(Bridge.Vec(0.04, scY, scZ)) end
                     comp:SetWorldScale3D(Bridge.Vec(0.04, scY, scZ))
                 end)
-                table.insert(State.Scars, actor)
+                TrackScar(actor, surface)
                 table.insert(created, actor)
             else
                 SafeDestroyActor(actor)
@@ -1164,7 +1290,7 @@ local function SpawnStarburstCracks(hitPoint, hitNormal)
                     )
                     comp:SetWorldScale3D(Bridge.Vec(0.28 + math.random() * 0.16, 0.04, 0.03))
                 end)
-                table.insert(State.Scars, actor)
+                TrackScar(actor, surface)
                 table.insert(created, actor)
             else
                 SafeDestroyActor(actor)
@@ -1187,12 +1313,115 @@ local function BuildIgnoreList(slender, survivor)
         if Logger.IsValidObj(p) then table.insert(ignore, p) end
     end
     for _, s in ipairs(State.Scars) do
-        if Logger.IsValidObj(s) then table.insert(ignore, s) end
+        if Logger.IsValidObj(s.actor) then table.insert(ignore, s.actor) end
+    end
+    for _, splinter in ipairs(State.SplinterPool) do
+        if Logger.IsValidObj(splinter.actor) then table.insert(ignore, splinter.actor) end
     end
     for _, bf in ipairs(State.BreachFrames) do
         if bf and Logger.IsValidObj(bf.actor) then table.insert(ignore, bf.actor) end
     end
     return ignore
+end
+
+local function IsInvisibleBlockerComponent(comp, actor)
+    if not Logger.IsValidObj(comp) or IsInstancedComponent(comp) or WallBreach.IsRemnant(comp) then
+        return false
+    end
+    local hidden, hasMesh = false, false
+    pcall(function()
+        hidden = (comp.bHiddenInGame == true) or (comp.bVisible == false)
+        if actor and actor.bHidden == true then hidden = true end
+        hasMesh = Logger.IsValidObj(comp.StaticMesh)
+    end)
+    if hidden then return true end
+    if not hasMesh then
+        local cname = string.lower(Logger.SafeName(comp))
+        if cname:find("box", 1, true) or cname:find("collision", 1, true)
+            or cname:find("blocker", 1, true) or cname:find("capsule", 1, true)
+            or cname:find("sphere", 1, true) or cname:find("trigger", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function FindSiblingVisibleHit(actor, startPos, endPos, impactPt, ignoreComp)
+    if not Logger.IsValidObj(actor) then return nil end
+    local smClass = Bridge.GetClass("/Script/Engine.StaticMeshComponent")
+    if not smClass then return nil end
+    local ignoreAddr = Bridge.GetObjAddr(ignoreComp)
+    local bestComp, bestDist, bestLoc, bestNrm = nil, 999999.0, nil, nil
+    local function CheckPart(c)
+        if not Logger.IsValidObj(c) or Bridge.GetObjAddr(c) == ignoreAddr then return end
+        if not IsVisibleMesh(c, actor) then return end
+        local colEn = 0
+        pcall(function() colEn = tonumber(c:GetCollisionEnabled()) or 0 end)
+        if colEn == 0 then return end
+        local hl, hn, outHit = {}, {}, {}
+        local ok, didHit = pcall(function()
+            return c:K2_LineTraceComponent(
+                Bridge.Vec(startPos.X, startPos.Y, startPos.Z),
+                Bridge.Vec(endPos.X, endPos.Y, endPos.Z),
+                false, false, false, hl, hn, {}, outHit
+            )
+        end)
+        if ok and didHit then
+            local loc = (hl and hl.X) and { X = hl.X, Y = hl.Y, Z = hl.Z }
+                or (outHit and outHit.ImpactPoint and { X = outHit.ImpactPoint.X, Y = outHit.ImpactPoint.Y, Z = outHit.ImpactPoint.Z })
+                or impactPt
+            local d = loc and Bridge.Dist(startPos, loc) or 999999.0
+            if d < bestDist then
+                bestDist = d
+                bestComp = c
+                bestLoc = loc
+                bestNrm = (hn and hn.X) and { X = hn.X, Y = hn.Y, Z = hn.Z } or nil
+            end
+        end
+    end
+    pcall(function()
+        local parts = actor:K2_GetComponentsByClass(smClass)
+        if type(parts) == "table" then
+            for _, entry in ipairs(parts) do CheckPart(Bridge.ResolveObjectParam(entry)) end
+        elseif parts then
+            parts:ForEach(function(_, entry) CheckPart(Bridge.ResolveObjectParam(entry)) end)
+        end
+    end)
+    if bestComp then
+        return {
+            Actor = actor,
+            Component = bestComp,
+            ImpactPoint = bestLoc or impactPt,
+            ImpactNormal = bestNrm,
+            Distance = bestDist,
+        }
+    end
+    return nil
+end
+
+local function TracePastInvisibleBlockers(world, startPos, endPos, ignore)
+    local localIgnore = {}
+    for _, a in ipairs(ignore or {}) do localIgnore[#localIgnore + 1] = a end
+    for _ = 1, 5 do
+        local hit, info = Bridge.LineTrace(world, startPos, endPos, localIgnore, 0, false)
+        if not hit or not info or not Logger.IsValidObj(info.Component) then
+            return hit, info
+        end
+        if not IsInvisibleBlockerComponent(info.Component, info.Actor) then
+            return hit, info
+        end
+        local siblingInfo = FindSiblingVisibleHit(info.Actor, startPos, endPos, info.ImpactPoint, info.Component)
+        if siblingInfo then
+            siblingInfo.ImpactNormal = siblingInfo.ImpactNormal or info.ImpactNormal
+            return true, siblingInfo
+        end
+        if Logger.IsValidObj(info.Actor) then
+            table.insert(localIgnore, info.Actor)
+        else
+            return hit, info
+        end
+    end
+    return false, nil
 end
 
 local function ResolveAimHit(world, slender, survivor, camCtrl, reachCm, overrideRay)
@@ -1203,10 +1432,12 @@ local function ResolveAimHit(world, slender, survivor, camCtrl, reachCm, overrid
     end
 
     local traceStart, traceFwd
+    local fromCamera = false
     if overrideRay and overrideRay.pos and overrideRay.fwd then
         traceStart = overrideRay.pos
         traceFwd   = overrideRay.fwd
     elseif camPos and camRot then
+        fromCamera = true
         local fx, fy, fz = Bridge.ForwardFromRot(camRot.Pitch, camRot.Yaw)
         traceFwd = { X = fx, Y = fy, Z = fz }
         local startDist = math.max(90.0, Bridge.Dist(camPos, slLoc) - 45.0)
@@ -1228,7 +1459,7 @@ local function ResolveAimHit(world, slender, survivor, camCtrl, reachCm, overrid
         Y = traceStart.Y + traceFwd.Y * reachCm,
         Z = traceStart.Z + traceFwd.Z * reachCm,
     }
-    local hit, info = Bridge.LineTrace(world, traceStart, endPos, ignore, 0, false)
+    local hit, info = TracePastInvisibleBlockers(world, traceStart, endPos, ignore)
 
     if not hit then
         local yaw = camRot and camRot.Yaw or (camCtrl and camCtrl.GetYaw and camCtrl.GetYaw() or 0.0)
@@ -1240,12 +1471,20 @@ local function ResolveAimHit(world, slender, survivor, camCtrl, reachCm, overrid
         }
         for _, off in ipairs(offsets) do
             local eAlt = { X = endPos.X + off.X, Y = endPos.Y + off.Y, Z = endPos.Z + off.Z }
-            local h2, i2 = Bridge.LineTrace(world, traceStart, eAlt, ignore, 0, false)
+            local h2, i2 = TracePastInvisibleBlockers(world, traceStart, eAlt, ignore)
             if h2 and i2 then
                 hit, info = h2, i2
                 break
             end
         end
+    end
+
+    if fromCamera then
+        -- The shoulder camera selects a point. The hammer must reach it from the character's side of any cover.
+        local chest = { X = slLoc.X, Y = slLoc.Y, Z = slLoc.Z + 80.0 }
+        local aimPoint = (hit and info and info.ImpactPoint) or endPos
+        local bodyHit, bodyInfo = TracePastInvisibleBlockers(world, chest, aimPoint, ignore)
+        if bodyHit then hit, info = bodyHit, bodyInfo end
     end
 
     if hit and info and info.ImpactPoint then
@@ -1255,22 +1494,13 @@ local function ResolveAimHit(world, slender, survivor, camCtrl, reachCm, overrid
         end
     end
 
-    local airEnd = {
-        X = slLoc.X + traceFwd.X * 195.0,
-        Y = slLoc.Y + traceFwd.Y * 195.0,
-        Z = slLoc.Z + traceFwd.Z * 195.0,
-    }
-    local gHit, gInfo = Bridge.LineTrace(world,
-        { X = airEnd.X, Y = airEnd.Y, Z = airEnd.Z + 120.0 },
-        { X = airEnd.X, Y = airEnd.Y, Z = airEnd.Z - 260.0 },
-        ignore, 0, false)
-    return false, (gHit and gInfo or nil), traceFwd, ignore, airEnd
+    return false, nil, traceFwd, ignore
 end
 
 local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, humanFear, overrideRay)
     local slLoc = Bridge.GetActorLoc(slender) or { X = 0, Y = 0, Z = 100 }
     local reach = Config.HAMMER.REACH_CM or 460.0
-    local hit, info, swingDir, ignore, fallbackLoc = ResolveAimHit(world, slender, survivor, camCtrl, reach, overrideRay)
+    local hit, info, swingDir, ignore = ResolveAimHit(world, slender, survivor, camCtrl, reach, overrideRay)
 
     -- Survivor melee shock
     if Logger.IsValidObj(survivor) and humanFear then
@@ -1288,29 +1518,10 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
         end
     end
 
-    local impactLoc = (hit and info and info.ImpactPoint) or (info and info.ImpactPoint) or fallbackLoc or {
-        X = slLoc.X + swingDir.X * 180.0,
-        Y = slLoc.Y + swingDir.Y * 180.0,
-        Z = slLoc.Z + 20.0,
-    }
-    local impactNrm = (info and info.ImpactNormal) or { X = -swingDir.X, Y = -swingDir.Y, Z = 1.0 }
-
-    -- Open-air whiff or out-of-reach swing
-    if (not hit) or (not info) or (not Logger.IsValidObj(info.Component)) then
-        if isHeavy then
-            State.HitStopTimer = Config.HAMMER.HITSTOP_HEAVY_SEC or 0.065
-            PlayImpactSound(impactLoc, "STONE", true, true)
-            TriggerImpactFlash(impactLoc, true)
-            if camCtrl and camCtrl.AddImpactShake then
-                camCtrl.AddImpactShake(Config.HAMMER.SHAKE_HEAVY_CM or 18.0, Config.HAMMER.SHAKE_DURATION or 0.24)
-            end
-            SpawnSplinters(impactLoc, impactNrm, swingDir, "STONE", FirstValidAsset({ PATHS.MAT_STONE, PATHS.MAT_WOOD_DARK }), 10, 48.0, 420.0)
-            ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
-        else
-            Bridge.PlaySound2D(world, PATHS.SND_HANDLE, 0.35, 0.72, { "doorhandle" })
-        end
-        return
-    end
+    -- The swing already played its movement sound. All impact effects need contact.
+    if not hit or not info or not info.ImpactPoint or not Logger.IsValidObj(info.Component) then return end
+    local impactLoc = info.ImpactPoint
+    local impactNrm = info.ImpactNormal or { X = -swingDir.X, Y = -swingDir.Y, Z = -swingDir.Z }
 
     local hitComp  = info.Component
     local hitActor = info.Actor
@@ -1328,14 +1539,97 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
         )
     end
 
+    -- Protected actors and instanced meshes must be resolved before touching shared physics state.
+    local instanced = IsInstancedComponent(hitComp)
+    local isProt, protReason = IsProtectedTarget(hitComp, hitActor, impactNrm, ext, orig, instanced)
+    if isProt then
+        PlayImpactSound(impactLoc, kind, isHeavy, isHeavy)
+        SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, isHeavy and 12 or 7, 36.0, isHeavy and 440.0 or 260.0)
+        if isHeavy then
+            SpawnStarburstCracks(impactLoc, impactNrm)
+            ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
+        end
+        Logger.Info(string.format("HammerMgr: Protected crater on %s (%s)", Logger.SafeName(hitComp), tostring(protReason)))
+        return
+    end
+
+    if instanced then
+        local idx = tonumber(info.Item)
+        local ok, count = pcall(function() return hitComp:GetInstanceCount() end)
+        if not idx or idx % 1 ~= 0 or idx < 0 or not ok or type(count) ~= "number" or idx >= count then
+            PlayImpactSound(impactLoc, kind, isHeavy, false)
+            return
+        end
+        local treeMesh = string.lower(Logger.SafeName(hitComp.StaticMesh))
+        local hasTrunk = treeMesh:find("tree", 1, true) or treeMesh:find("pine", 1, true)
+            or treeMesh:find("conifer", 1, true) or treeMesh:find("birch", 1, true)
+            or treeMesh:find("spruce", 1, true) or treeMesh:find("trunk", 1, true)
+        local removed, success = pcall(function() return hitComp:RemoveInstance(idx) end)
+        if not removed or not success then
+            PlayImpactSound(impactLoc, kind, isHeavy, false)
+            return
+        end
+        local impactKind = hasTrunk and "TREE" or kind
+        if not hasTrunk and kind == "TREE" and (treeMesh:find("rock", 1, true) or treeMesh:find("stone", 1, true)) then
+            impactKind = "STONE"
+        end
+        PlayImpactSound(impactLoc, impactKind, isHeavy, true)
+        local treeLogs = 0
+        if hasTrunk then
+            local cylMesh = Bridge.LoadOrFindAsset(PATHS.MESH_CYLINDER)
+            local barkMat = FirstValidAsset({ PATHS.MAT_BARK, PATHS.MAT_WOOD_DARK })
+            for logIdx = 1, (isHeavy and 4 or 3) do
+                if not Logger.IsValidObj(cylMesh) then break end
+                local pos = { X = impactLoc.X, Y = impactLoc.Y, Z = impactLoc.Z + (logIdx - 1) * 92 }
+                local log = Bridge.SpawnActorDeferred(world, "/Script/Engine.StaticMeshActor", pos, math.random() * 360)
+                local comp = GetStaticMeshComp(log)
+                local valid = Logger.IsValidObj(comp) and pcall(function()
+                    comp:SetMobility(2)
+                    if not comp:SetStaticMesh(cylMesh) and not Logger.IsValidObj(comp.StaticMesh) then error("missing trunk mesh") end
+                    comp:SetWorldScale3D(Bridge.Vec(0.24, 0.24, 0.85))
+                    if Logger.IsValidObj(barkMat) then comp:SetMaterial(0, barkMat) end
+                end)
+                if valid and EnableChaosPhysics(comp, 34) then
+                    EvictOldEntry(State.DebrisPool, Config.HAMMER.MAX_ACTIVE_DEBRIS or 160)
+                    ApplyChaosImpulse(comp, { X = swingDir.X * 260, Y = swingDir.Y * 260, Z = 160 + logIdx * 40 }, nil, 180)
+                    table.insert(State.DebrisPool, { actor = log, comp = comp, address = Bridge.GetObjAddr(comp), spawnedAt = os.clock() })
+                    State.ChunksSpawned = State.ChunksSpawned + 1
+                    treeLogs = treeLogs + 1
+                else
+                    SafeDestroyActor(log)
+                end
+            end
+        end
+        SpawnSplinters(impactLoc, impactNrm, swingDir, impactKind, debrisMat, isHeavy and 12 or 8, 36, 380)
+        if isHeavy then
+            ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680, swingDir, ignore)
+        end
+        State.DestroyedCount = State.DestroyedCount + 1
+        Logger.Info(string.format("HammerMgr: Broke instance %d of %s (%d trunk logs)", idx, treeMesh, treeLogs))
+        return
+    end
+
     -- Tier 0: Already-simulating Chaos Rigid Body (GMod prop OR collapsed Teardown chunk) -> bat or shatter in place!
     local isAlreadySim = false
     pcall(function() isAlreadySim = (hitComp:IsSimulatingPhysics(Bridge.FName("None")) == true) end)
     if isAlreadySim then
         PlayImpactSound(impactLoc, kind, isHeavy, isHeavy)
         if isHeavy then
+            -- A second blow reduces a loose chunk to grit instead of making larger chunks from it.
+            for i, piece in ipairs(State.DebrisPool) do
+                if compAddr ~= 0 and (piece.address or Bridge.GetObjAddr(piece.comp)) == compAddr then
+                    local dust = SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 4, 12.0, 220.0)
+                    if dust > 0 then
+                        SafeDestroyActor(piece.actor)
+                        table.remove(State.DebrisPool, i)
+                    end
+                    return
+                end
+            end
+            local gridCount = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 35, Y = 35, Z = 35 }, debrisMat, debrisMat, kind, impactLoc, swingDir, true, false, nil, ignore, hitActor)
+            if gridCount == 0 then return end
             DisableComponentAndActor(hitComp)
-            local gridCount = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 35, Y = 35, Z = 35 }, debrisMat, debrisMat, kind, impactLoc, swingDir, true, false, nil, ignore)
+            State.SimProps[compAddr] = nil
             SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 10, 28.0, 440.0)
             ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
             State.DestroyedCount = State.DestroyedCount + 1
@@ -1346,69 +1640,6 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
             SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 6, 18.0, 320.0)
             Logger.Info("HammerMgr: Batted Chaos prop " .. Logger.SafeName(hitComp))
         end
-        return
-    end
-
-    -- Tier 1: Instanced Foliage Trees / Bushes -> RemoveInstance + Falling Log & Bark Chunks!
-    local isISM = string.find(Logger.SafeFullName(hitComp), "InstancedStaticMesh", 1, true) ~= nil
-    if not isISM then
-        pcall(function() isISM = (hitComp.RemoveInstance ~= nil) end)
-    end
-    if isISM and info.Item ~= nil and tonumber(info.Item) and tonumber(info.Item) >= 0 then
-        local idx = tonumber(info.Item)
-        local removed = false
-        pcall(function() removed = (hitComp:RemoveInstance(idx) == true) end)
-        if removed then
-            PlayImpactSound(impactLoc, "TREE", isHeavy, true)
-            local cylMesh = Bridge.LoadOrFindAsset(PATHS.MESH_CYLINDER)
-            local barkMat = FirstValidAsset({ PATHS.MAT_BARK, PATHS.MAT_WOOD_DARK })
-            local treeLogs = 0
-            -- Spawn colliding log trunk sections falling in swing direction
-            for logIdx = 1, (isHeavy and 4 or 3) do
-                if Logger.IsValidObj(cylMesh) then
-                    EvictOldEntry(State.DebrisPool, Config.HAMMER.MAX_ACTIVE_DEBRIS or 160)
-                    local lp = { X = impactLoc.X + (math.random() - 0.5) * 28.0, Y = impactLoc.Y + (math.random() - 0.5) * 28.0, Z = impactLoc.Z + (logIdx - 1) * 78.0 }
-                    local la = Bridge.SpawnActorDeferred(world, "/Script/Engine.StaticMeshActor", lp, math.random() * 360.0)
-                    if Logger.IsValidObj(la) then
-                        local lc = GetStaticMeshComp(la)
-                        if Logger.IsValidObj(lc) then
-                            pcall(function() lc:SetStaticMesh(cylMesh) end)
-                            pcall(function()
-                                lc:K2_SetRelativeRotation(Bridge.Rot((math.random() - 0.5) * 25.0, math.random() * 180.0, (math.random() - 0.5) * 25.0), false, {}, true)
-                                lc:SetWorldScale3D(Bridge.Vec(0.24, 0.24, 0.85 + math.random() * 0.35))
-                            end)
-                            if Logger.IsValidObj(barkMat) then pcall(function() lc:SetMaterial(0, barkMat) end) end
-                            EnableChaosPhysics(lc, 34.0)
-                            ApplyChaosImpulse(lc, { X = swingDir.X * 260.0 + (math.random() - 0.5) * 120.0, Y = swingDir.Y * 260.0 + (math.random() - 0.5) * 120.0, Z = 160.0 + logIdx * 40.0 }, nil, 180.0)
-                            table.insert(State.DebrisPool, { actor = la, comp = lc, spawnedAt = os.clock() })
-                            State.ChunksSpawned = State.ChunksSpawned + 1
-                            treeLogs = treeLogs + 1
-                        else
-                            SafeDestroyActor(la)
-                        end
-                    end
-                end
-            end
-            SpawnSplinters(impactLoc, impactNrm, swingDir, "TREE", debrisMat, isHeavy and 12 or 8, 36.0, 380.0)
-            if isHeavy then
-                ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
-            end
-            State.DestroyedCount = State.DestroyedCount + 1
-            Logger.Info(string.format("HammerMgr: Felled Foliage #%d (%d trunk logs + splinters)", idx, treeLogs))
-            return
-        end
-    end
-
-    -- Check Protected Surfaces (Terrain, floors underfoot, pickups, switches)
-    local isProt, protReason = IsProtectedTarget(hitComp, hitActor, impactNrm, ext, orig)
-    if isProt then
-        PlayImpactSound(impactLoc, kind, isHeavy, isHeavy)
-        SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, isHeavy and 12 or 7, 36.0, isHeavy and 440.0 or 260.0)
-        if isHeavy then
-            SpawnStarburstCracks(impactLoc, impactNrm)
-            ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
-        end
-        Logger.Info(string.format("HammerMgr: Protected crater on %s (%s)", Logger.SafeName(hitComp), tostring(protReason)))
         return
     end
 
@@ -1432,8 +1663,100 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
         or string.find(blob, "glass", 1, true) or string.find(blob, "shutter", 1, true)
     )
 
-    -- Tier 2: Giant Monolith Shells (> 720cm half-extent) -> Starburst scar + Chunk burst without deleting terrain
-    if maxExt > (Config.HAMMER.GIANT_MESH_MIN_EXT or 720.0) then
+local function DetachOrDisableTrims(attachedTrim, swingDir)
+    if type(attachedTrim) ~= "table" then return 0 end
+    local count = 0
+    for _, at in ipairs(attachedTrim) do
+        local isDecalOrPeel = string.find(at.blob, "peel", 1, true) or string.find(at.blob, "decal", 1, true)
+        if not isDecalOrPeel and TryDetachProp(at.comp, 14.0) then
+            local tAddr = Bridge.GetObjAddr(at.comp)
+            if tAddr ~= 0 then State.SimProps[tAddr] = { comp = at.comp } end
+            ApplyChaosImpulse(at.comp, { X = swingDir.X * 260.0 + (math.random() - 0.5) * 140.0, Y = swingDir.Y * 260.0 + (math.random() - 0.5) * 140.0, Z = 160.0 }, at.orig, 260.0)
+            State.DetachedCount = State.DetachedCount + 1
+        else
+            DisableComponentAndActor(at.comp)
+        end
+        count = count + 1
+    end
+    return count
+end
+
+    -- Broad upright panels retain their solid sides and lintel around a local opening.
+    local panel = WallBreach.Describe(hitComp, orig, impactNrm, blob)
+    if panel then
+        local oldKind, oldMat = WallBreach.Material(hitComp)
+        kind, debrisMat = oldKind or kind, oldMat or debrisMat
+        local isRemnant = WallBreach.IsRemnant(hitComp)
+        local rec = State.Cracked[compAddr]
+        if (not isHeavy) and (not isRemnant) and compAddr ~= 0 then
+            if not rec then
+                rec = {hp = Config.HAMMER.WALL_CRACKS_TO_BREAK or 2, comp = hitComp}
+                State.Cracked[compAddr] = rec
+            end
+            rec.hp = math.max(0, rec.hp - 1)
+            if rec.hp > 0 then
+                local scarList = SpawnStarburstCracks(impactLoc, impactNrm, compAddr)
+                PlayImpactSound(impactLoc, kind, false, false)
+                SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 6, 18, 280)
+                Logger.Info(string.format("HammerMgr: Cracked wall %s (starburst scars=%d, remaining=%d)", Logger.SafeName(hitComp), #scarList, rec.hp))
+                return
+            end
+        end
+        local cut, layers, breachTrims = WallBreach.Open(world, hitComp, panel, impactLoc, impactNrm,
+            debrisMat, kind, isHeavy, ignore, ClassifyMaterial, IsProtectedTarget)
+        if cut then
+            local chunks = 0
+            local rows, cols = isHeavy and 3 or 2, isHeavy and 4 or 3
+            local w, h = cut.width / cols, cut.height / rows
+            for row = 1, rows do
+                for col = 1, cols do
+                    local u = (col - 0.5) * w - cut.width/2
+                    local z = (row - 0.5) * h - cut.height/2
+                    local pos = Bridge.Vec(cut.center.X + u*cut.ux, cut.center.Y + u*cut.uy, cut.center.Z + z)
+                    local scale = Bridge.Vec(w*0.0085, math.min(24, cut.depth)*0.0085, h*0.0085)
+                    local speed = (isHeavy and 260 or 160) * (0.75 + math.random()*0.45)
+                    local impulse = Bridge.Vec(swingDir.X*speed + cut.ux*u, swingDir.Y*speed + cut.uy*u, 90 + math.random()*90)
+                    local pieceMat = layers[(chunks % #layers)+1].mat or debrisMat
+                    if SpawnChaosCube(pos, Bridge.Rot(0,cut.yaw,0), scale, pieceMat, 16, impulse, 160, false) then
+                        chunks = chunks + 1
+                    end
+                end
+            end
+            for _, layer in ipairs(layers) do
+                ClearSurfaceScars(layer.id)
+                State.Cracked[layer.id] = nil
+                DisableSiblingCollisionBlockers(layer.comp)
+            end
+            local trimsCut = DetachOrDisableTrims(breachTrims, swingDir)
+            State.DestroyedCount = State.DestroyedCount + 1
+            State.PairedWallsBroken = State.PairedWallsBroken + #layers - 1
+            SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, isHeavy and 9 or 5, 22, 320)
+            PlayImpactSound(impactLoc, kind, isHeavy, true)
+            if isHeavy then
+                ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680, swingDir, ignore)
+            end
+            Logger.Info(string.format("HammerMgr: Local breach %.0f x %.0f cm (layers=%d, trims=%d, chunks=%d)",
+                cut.width, cut.height, #layers, trimsCut, chunks))
+            return
+        end
+        -- If local doorway cutting failed (e.g. cutout window mesh or remnant pool cap), fall through to full collapse instead of becoming unbreakable.
+    end
+
+    -- Giant natural terrain/rocks remain surface-carved, while multi-wall building shells (<=2200cm) can be breached.
+    local isGiantEnv = string.find(blob, "rock", 1, true) or string.find(blob, "cliff", 1, true)
+        or string.find(blob, "mountain", 1, true) or string.find(blob, "boulder", 1, true)
+        or string.find(blob, "terrain", 1, true) or string.find(blob, "landscape", 1, true)
+        or string.find(blob, "ground", 1, true) or string.find(blob, "road", 1, true)
+        or string.find(blob, "hill", 1, true) or string.find(blob, "cave", 1, true)
+        or string.find(blob, "floor", 1, true)
+    local isStructuralShell = (not isGiantEnv) and (maxExt <= 2200.0) and (
+        isWallLike
+        or string.find(blob, "house", 1, true) or string.find(blob, "building", 1, true)
+        or string.find(blob, "barn", 1, true) or string.find(blob, "fence", 1, true)
+        or string.find(blob, "wood", 1, true) or string.find(blob, "panel", 1, true)
+        or string.find(blob, "plaster", 1, true) or string.find(blob, "metal", 1, true)
+    )
+    if maxExt > (Config.HAMMER.GIANT_MESH_MIN_EXT or 720.0) and (not isStructuralShell) then
         PlayImpactSound(impactLoc, kind, isHeavy, isHeavy)
         SpawnStarburstCracks(impactLoc, impactNrm)
         local nChunks = isHeavy and 10 or 5
@@ -1456,7 +1779,7 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
         PlayImpactSound(impactLoc, kind, isHeavy, true)
         local detached = false
         if (not isHeavy) and maxExt <= (Config.HAMMER.MEDIUM_PROP_MAX_EXT or 420.0) and kind ~= "GLASS" then
-            detached = EnableChaosPhysics(hitComp, 38.0)
+            detached = TryDetachProp(hitComp, 38.0)
         end
         if detached then
             local imp = Config.HAMMER.LIGHT_IMPULSE or 560.0
@@ -1465,8 +1788,9 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
             State.DetachedCount = State.DetachedCount + 1
             SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 8, 28.0, 380.0)
         else
+            local chunks = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 45, Y = 45, Z = 100 }, debrisMat, FallbackMaterialFor(kind, blob), kind, impactLoc, swingDir, isHeavy, false, nil, ignore, hitActor)
+            if chunks == 0 then return end
             DisableComponentAndActor(hitComp)
-            FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 45, Y = 45, Z = 100 }, debrisMat, FallbackMaterialFor(kind, blob), kind, impactLoc, swingDir, isHeavy, false, nil, ignore)
             SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 10, 36.0, 420.0)
             State.DestroyedCount = State.DestroyedCount + 1
         end
@@ -1483,7 +1807,7 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
     -- Tier 4: Standalone Props -> GMod Chaos Rigid-Body Detach (LMB) OR Proportional In-Place Grid Shatter (RMB / Fallback)
     if (not isWallLike) and maxExt <= (Config.HAMMER.MEDIUM_PROP_MAX_EXT or 420.0) then
         if (not isHeavy) and maxExt <= (Config.HAMMER.SMALL_PROP_MAX_EXT or 145.0) then
-            local detached = EnableChaosPhysics(hitComp, math.max(14.0, maxExt * 0.35))
+            local detached = TryDetachProp(hitComp, math.max(14.0, maxExt * 0.35))
             if detached then
                 PlayImpactSound(impactLoc, kind, false, false)
                 local imp = Config.HAMMER.LIGHT_IMPULSE or 560.0
@@ -1498,8 +1822,9 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
 
         -- Shatter prop cleanly IN PLACE into interlocking solid pieces matching its exact volume!
         PlayImpactSound(impactLoc, kind, isHeavy, true)
+        local gridChunks = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 40, Y = 40, Z = 40 }, debrisMat, FallbackMaterialFor(kind, blob), kind, impactLoc, swingDir, isHeavy, false, nil, ignore, hitActor)
+        if gridChunks == 0 then return end
         DisableComponentAndActor(hitComp)
-        local gridChunks = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 40, Y = 40, Z = 40 }, debrisMat, FallbackMaterialFor(kind, blob), kind, impactLoc, swingDir, isHeavy, false, nil, ignore)
         SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 10, 34.0, 420.0)
         if isHeavy then
             ApplyRadialShockwave(impactLoc, Config.HAMMER.HEAVY_RADIUS_CM or 340.0, Config.HAMMER.HEAVY_RADIAL_IMPULSE or 680.0, swingDir, ignore)
@@ -1511,17 +1836,16 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
 
     -- Tier 5: Modular Walls & Heavy Structures -> Starburst Crack (LMB Hit 1) -> Full Double-Layer Breach + Framing + 4x4 Collapse!
     local rec = (compAddr ~= 0) and State.Cracked[compAddr] or nil
-    if (not isHeavy) and isWallLike then
+    if (not isHeavy) and (isWallLike or isStructuralShell) then
         if not rec then
-            rec = { hp = (Config.HAMMER.WALL_CRACKS_TO_BREAK or 2) - 1, comp = hitComp, scars = {} }
+            rec = { hp = (Config.HAMMER.WALL_CRACKS_TO_BREAK or 2) - 1, comp = hitComp }
             if compAddr ~= 0 then State.Cracked[compAddr] = rec end
         else
             rec.hp = rec.hp - 1
         end
         if rec.hp > 0 then
             PlayImpactSound(impactLoc, kind, false, false)
-            local scarList = SpawnStarburstCracks(impactLoc, impactNrm)
-            for _, sa in ipairs(scarList) do table.insert(rec.scars, sa) end
+            local scarList = SpawnStarburstCracks(impactLoc, impactNrm, compAddr)
             SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, 9, 32.0, 360.0)
             Logger.Info(string.format("HammerMgr: Cracked wall %s (starburst scars=%d, remaining=%d)", Logger.SafeName(hitComp), #scarList, rec.hp))
             return
@@ -1530,23 +1854,45 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
 
     -- Full Wall / Structure Collapse
     PlayImpactSound(impactLoc, kind, isHeavy, true)
-    if rec and rec.scars then
-        DestroyArrayActors(rec.scars)
-    end
-    if compAddr ~= 0 then State.Cracked[compAddr] = nil end
 
     -- 1. Resolve Coplanar Paired Wall Sandwich + Attached Trims BEFORE hiding hitComp!
     local pairedWalls, attachedTrim, thinAxis, backMat = {}, {}, nil, nil
-    if ext and (string.find(blob, "wall", 1, true) or string.find(blob, "siding", 1, true) or string.find(blob, "drywall", 1, true) or string.find(blob, "patch", 1, true)) then
+    if ext and (isWallLike or isStructuralShell or string.find(blob, "wall", 1, true)
+        or string.find(blob, "siding", 1, true) or string.find(blob, "drywall", 1, true)
+        or string.find(blob, "patch", 1, true) or string.find(blob, "plaster", 1, true)) then
         pairedWalls, attachedTrim, thinAxis, backMat = FindCoplanarWallGroup(hitComp, hitActor, orig, ext, impactLoc, impactNrm, ignore)
     end
+
+    local fractureOrig = orig or impactLoc
+    local fractureExt  = ext or { X = 120, Y = 20, Z = 120 }
+    if maxExt > 450.0 and orig and ext then
+        thinAxis = thinAxis or DetectWallThinAxis(nil, impactNrm)
+        local wideAxis = (thinAxis == "X") and "Y" or "X"
+        local halfZ = math.min(ext.Z, 130.0)
+        fractureOrig = {
+            X = impactLoc.X,
+            Y = impactLoc.Y,
+            Z = Bridge.Clamp(impactLoc.Z, orig.Z - ext.Z + halfZ, orig.Z + ext.Z - halfZ),
+        }
+        fractureExt = {
+            [thinAxis] = 16.0,
+            [wideAxis] = 120.0,
+            Z = halfZ,
+        }
+    end
+
+    local isUprightWall = (thinAxis ~= nil and fractureExt and fractureExt.Z >= 75.0)
+    local wallChunks = FractureBoundsToChaosGrid(fractureOrig, fractureExt, debrisMat, backMat or FallbackMaterialFor(kind, "wall_in"), kind, impactLoc, swingDir, isHeavy, isUprightWall, thinAxis, ignore, hitActor)
+    if wallChunks == 0 then return end
+    ClearSurfaceScars(compAddr)
+    if compAddr ~= 0 then State.Cracked[compAddr] = nil end
 
     -- 2. Disable front wall AND all coplanar paired inner/outer wall twins in the SAME frame (no transparent ghost walls!)
     DisableComponentAndActor(hitComp)
     for _, pw in ipairs(pairedWalls) do
         local pAddr = Bridge.GetObjAddr(pw.comp)
-        if pAddr ~= 0 and State.Cracked[pAddr] and State.Cracked[pAddr].scars then
-            DestroyArrayActors(State.Cracked[pAddr].scars)
+        if pAddr ~= 0 then
+            ClearSurfaceScars(pAddr)
             State.Cracked[pAddr] = nil
         end
         DisableComponentAndActor(pw.comp)
@@ -1554,27 +1900,15 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
     end
 
     -- 3. Rip baseboards / trims / wall switches off into Chaos physics (or hide decals/peels)
-    for _, at in ipairs(attachedTrim) do
-        local isDecalOrPeel = string.find(at.blob, "peel", 1, true) or string.find(at.blob, "decal", 1, true)
-        if not isDecalOrPeel and EnableChaosPhysics(at.comp, 14.0) then
-            local tAddr = Bridge.GetObjAddr(at.comp)
-            if tAddr ~= 0 then State.SimProps[tAddr] = { comp = at.comp } end
-            ApplyChaosImpulse(at.comp, { X = swingDir.X * 260.0 + (math.random() - 0.5) * 140.0, Y = swingDir.Y * 260.0 + (math.random() - 0.5) * 140.0, Z = 160.0 }, at.orig, 260.0)
-            State.DetachedCount = State.DetachedCount + 1
-        else
-            DisableComponentAndActor(at.comp)
-        end
-    end
+    local trimsCut = DetachOrDisableTrims(attachedTrim, swingDir)
 
     -- 4. Spawn jagged broken wood framing capping the exposed cavity edges (if upright wall)
     local frameCount = 0
-    if thinAxis and ext and ext.Z >= 75.0 then
-        frameCount = SpawnBreachFrame(orig, ext, thinAxis, impactLoc)
+    if (kind == "WOOD" or isWallLike or isStructuralShell) and thinAxis and fractureExt and fractureExt.Z >= 75.0 then
+        frameCount = SpawnBreachFrame(fractureOrig, fractureExt, thinAxis, impactLoc)
     end
 
-    -- 5. Fracture into 4x4 Solid Alternating-Material Chaos Slabs + Studs in Place + Fast Splinters
-    local isUprightWall = (thinAxis ~= nil and ext and ext.Z >= 75.0)
-    local wallChunks = FractureBoundsToChaosGrid(orig or impactLoc, ext or { X = 120, Y = 20, Z = 120 }, debrisMat, backMat or FallbackMaterialFor(kind, "wall_in"), kind, impactLoc, swingDir, isHeavy, isUprightWall, thinAxis, ignore)
+    -- 5. Finish the opening with fast surface fragments.
     SpawnSplinters(impactLoc, impactNrm, swingDir, kind, debrisMat, isHeavy and 14 or 9, 44.0, 440.0)
 
     if isHeavy then
@@ -1583,7 +1917,7 @@ local function PerformHammerImpact(isHeavy, world, slender, survivor, camCtrl, h
     State.DestroyedCount = State.DestroyedCount + 1
     Logger.Info(string.format(
         "HammerMgr: BREACHED %s (pairedTwins=%d, trimsDetached=%d, frames=%d, solidChunks=%d, kind=%s)",
-        Logger.SafeName(hitComp), #pairedWalls, #attachedTrim, frameCount, wallChunks, kind))
+        Logger.SafeName(hitComp), #pairedWalls, trimsCut, frameCount, wallChunks, kind))
 end
 
 -- =========================================================

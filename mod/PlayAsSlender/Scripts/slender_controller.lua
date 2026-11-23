@@ -438,7 +438,7 @@ local function ResolveHorizontalMove(world, curPos, dirX, dirY, moveDist, ignore
     for _, dz in ipairs(probeHeights) do
         local startP = { X = curPos.X, Y = curPos.Y, Z = curPos.Z + dz }
         local endP   = { X = curPos.X + vx + dirX * r, Y = curPos.Y + vy + dirY * r, Z = curPos.Z + dz }
-        local hit, info = Bridge.LineTrace(world, startP, endP, ignore, 0, false)
+        local hit, info = Bridge.LineTrace(world, startP, endP, ignore, "Pawn", false)
         if hit and info and info.ImpactNormal then
             local norm = info.ImpactNormal
             if math.abs(norm.Z) < 0.55 then
@@ -462,7 +462,7 @@ local function ResolveHorizontalMove(world, curPos, dirX, dirY, moveDist, ignore
         local fy = vy / finalDist
         local checkStart = { X = curPos.X, Y = curPos.Y, Z = curPos.Z + 10.0 }
         local checkEnd   = { X = curPos.X + vx + fx * (r * 0.75), Y = curPos.Y + vy + fy * (r * 0.75), Z = curPos.Z + 10.0 }
-        local hit2, info2 = Bridge.LineTrace(world, checkStart, checkEnd, ignore, 0, false)
+        local hit2, info2 = Bridge.LineTrace(world, checkStart, checkEnd, ignore, "Pawn", false)
         if hit2 and info2 and info2.ImpactNormal and math.abs(info2.ImpactNormal.Z) < 0.55 then
             return curPos.X, curPos.Y, false
         end
@@ -500,7 +500,7 @@ function SlenderCtrl.MoveDirection(world, mx, my, dt, sprint, survivor)
         nextY,
         curPos.Z + Config.SLENDER.MAX_STEP_HEIGHT,
         curPos.Z - 400.0,
-        ignore
+        ignore, "Pawn"
     )
     if gHit and gNorm then
         if gNorm.Z >= 0.50 then
